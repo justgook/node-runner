@@ -37,9 +37,14 @@ $(WASM_NAME): $(SRC)
 
 web: $(WASM_NAME)
 	mkdir -p $(BUILD_DIR)/web
+	mkdir -p $(BUILD_DIR)/web/assets
 	mv $(WASM_NAME) $(BUILD_DIR)/web/
 	cp -f index.html $(BUILD_DIR)/web/
 	cp -f wasi.js $(BUILD_DIR)/web/
+	cp -f node-graph-assets.js $(BUILD_DIR)/web/
+	cp -f node-graph-view.js $(BUILD_DIR)/web/
+	cp -f assets/atlas-mtsdf.json $(BUILD_DIR)/web/assets/
+	cp -f assets/atlas-mtsdf.png $(BUILD_DIR)/web/assets/
 
 clean:
 	rm -rf $(BUILD_DIR) $(WASM_NAME)

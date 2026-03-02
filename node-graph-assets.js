@@ -1,0 +1,56 @@
+export function getNodeGraphRenderAssets() {
+  return {
+    theme: {
+      clear: [11 / 255, 25 / 255, 34 / 255, 1],
+      nodeFill: [15 / 255, 36 / 255, 49 / 255, 1],
+      nodeBorder: [78 / 255, 109 / 255, 128 / 255, 1],
+      nodeBorderSuccess: [44 / 255, 201 / 255, 170 / 255, 1],
+      nodeBorderError: [255 / 255, 107 / 255, 107 / 255, 1],
+      nodeBorderStale: [214 / 255, 164 / 255, 79 / 255, 1],
+      text: [214 / 255, 236 / 255, 248 / 255, 1],
+      edge: [70 / 255, 108 / 255, 132 / 255, 0.95],
+      edgeSuccess: [44 / 255, 201 / 255, 170 / 255, 0.98],
+      edgeError: [255 / 255, 107 / 255, 107 / 255, 0.98],
+      edgeStale: [222 / 255, 177 / 255, 95 / 255, 0.98],
+    },
+    node: {
+      width: 146,
+      height: 62,
+      portGapY: 18,
+    },
+    edge: {
+      handleMin: 26,
+      handleMax: 180,
+      halfWidthPx: 1.7,
+      glowPx: 2.2,
+      aaPx: 1.0,
+      dashPeriod: 0,
+      dashFill: 0.5,
+    },
+    text: {
+      mode: "mtsdf",
+      fontPx: 14,
+      aa: 8,
+      effect: "fill",
+      stroke: 2.5,
+      glow: 2,
+      shadowX: 4,
+      shadowY: -4,
+      source: {
+        metaUrl: "./assets/atlas-mtsdf.json",
+        atlasUrl: "./assets/atlas-mtsdf.png",
+        channels: 4,
+      },
+    },
+    nineSlice: {
+      enabled: true,
+      textureUrl: null,
+      size: 64,
+      left: 12,
+      right: 12,
+      top: 12,
+      bottom: 12,
+      borderPx: 2,
+    },
+  };
+}

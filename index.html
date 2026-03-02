@@ -365,7 +365,7 @@
 
       <div class="editor-wrap">
         <div class="graph-wrap">
-          <canvas id="graph"></canvas>
+          <node-graph-canvas id="graph-view"></node-graph-canvas>
         </div>
         <textarea id="source">print("hello from lua")
 
@@ -396,6 +396,8 @@ print("sum", total)
 
   <script type="module">
     import { WASI, File, OpenFile, ConsoleStdout } from "./wasi.js";
+    import "./node-graph-view.js";
+    import { getNodeGraphRenderAssets } from "./node-graph-assets.js";
 
     const SNIPPETS = {
       hello: 'print("hello from node-code")',
@@ -403,42 +405,11 @@ print("sum", total)
       err: "error('boom from node-code')",
     };
 
-    const NG = {
-      NODE_GOAL: 1,
-      NODE_CODE: 2,
-      MAX_NODES: 1024,
-      MAX_INPUTS: 32,
-      MAX_OUTPUTS: 32,
-      MAX_ARGS: 32,
-    };
-
-    const ABI = {
-      I32: 4,
-      INPUT_PORT_SIZE: 12,
-      OUTPUT_PORT_SIZE: 4,
-      VALUE_SLOT_SIZE: 12,
-      NODE_HEADER_SIZE: 32,
-    };
-    ABI.NODE_SIZE =
-      ABI.NODE_HEADER_SIZE +
-      NG.MAX_INPUTS * ABI.INPUT_PORT_SIZE +
-      NG.MAX_OUTPUTS * ABI.OUTPUT_PORT_SIZE +
-      NG.MAX_ARGS * ABI.VALUE_SLOT_SIZE;
-
     const INFO = {
       LAST_ERROR: 4,
       GENERATION: 8,
       NODE_COUNT: 12,
       ACTIVE_GOAL_COUNT: 20,
-      IO_LEN: 24 + NG.MAX_NODES * ABI.I32,
-    };
-    INFO.NODES = INFO.IO_LEN + ABI.I32;
-
-    const NODE = {
-      ID: 0,
-      KIND: 4,
-      EXEC_STATE: 8,
-      INPUT_COUNT: 20,
     };
 
     const ui = {
@@ -447,7 +418,7 @@ print("sum", total)
       reset: document.getElementById("reset"),
       clear: document.getElementById("clear"),
       clearEvents: document.getElementById("clear-events"),
-      graph: document.getElementById("graph"),
+      graph: document.getElementById("graph-view"),
       meta: document.getElementById("meta"),
       output: document.getElementById("output"),
       error: document.getElementById("error"),
@@ -504,110 +475,6 @@ print("sum", total)
       return td.decode(new Uint8Array(memory.buffer, ptr, len));
     }
 
-    function readNodes() {
-      const ptr = infoPtr();
-      const nodes = [];
-      for (let i = 0; i < NG.MAX_NODES; i++) {
-        const base = ptr + INFO.NODES + i * ABI.NODE_SIZE;
-        const id = dv.getUint32(base + NODE.ID, true);
-        if (id === 0) continue;
-        const kind = dv.getUint32(base + NODE.KIND, true);
-        const execState = dv.getUint32(base + NODE.EXEC_STATE, true);
-        const inputCount = dv.getUint32(base + NODE.INPUT_COUNT, true);
-        const inputs = [];
-        for (let j = 0; j < inputCount; j++) {
-          const inBase = base + ABI.NODE_HEADER_SIZE + j * ABI.INPUT_PORT_SIZE;
-          const inputId = dv.getUint32(inBase, true);
-          const srcNodeId = dv.getUint32(inBase + 4, true);
-          const srcOutputId = dv.getUint32(inBase + 8, true);
-          inputs.push({ inputId, srcNodeId, srcOutputId });
-        }
-        nodes.push({ id, kind, execState, inputs });
-      }
-      return nodes;
-    }
-
-    function ensureNodePosition(nodeId, index) {
-      if (nodePositions.has(nodeId)) return nodePositions.get(nodeId);
-      const col = index % 4;
-      const row = Math.floor(index / 4);
-      const pos = { x: 80 + col * 170, y: 54 + row * 110 };
-      nodePositions.set(nodeId, pos);
-      return pos;
-    }
-
-    function drawNode(ctx, node, x, y) {
-      const w = 132;
-      const h = 56;
-      const kindName = node.kind === NG.NODE_CODE ? "code" : node.kind === NG.NODE_GOAL ? "goal" : `k${node.kind}`;
-      const stateName = node.execState === 1 ? "success" : node.execState === 2 ? "error" : node.execState === 3 ? "stale" : "never";
-      const border = node.execState === 1 ? "#2cc9aa" : node.execState === 2 ? "#ff6b6b" : "#4e6d80";
-
-      ctx.fillStyle = "#0f2431";
-      ctx.strokeStyle = border;
-      ctx.lineWidth = 1.5;
-      ctx.beginPath();
-      ctx.roundRect(x, y, w, h, 10);
-      ctx.fill();
-      ctx.stroke();
-
-      ctx.fillStyle = "#d7ecf8";
-      ctx.font = "600 12px 'JetBrains Mono', monospace";
-      ctx.fillText(`${kindName} #${node.id}`, x + 10, y + 22);
-      ctx.fillStyle = "#9ec2d6";
-      ctx.font = "500 11px 'JetBrains Mono', monospace";
-      ctx.fillText(`state: ${stateName}`, x + 10, y + 40);
-    }
-
-    function renderGraph() {
-      if (!api || !memory) return;
-      const canvas = ui.graph;
-      const rect = canvas.getBoundingClientRect();
-      const dpr = Math.max(1, window.devicePixelRatio || 1);
-      const width = Math.max(1, Math.floor(rect.width));
-      const height = Math.max(1, Math.floor(rect.height));
-      if (canvas.width !== Math.floor(width * dpr) || canvas.height !== Math.floor(height * dpr)) {
-        canvas.width = Math.floor(width * dpr);
-        canvas.height = Math.floor(height * dpr);
-      }
-      const ctx = canvas.getContext("2d");
-      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-      ctx.clearRect(0, 0, width, height);
-
-      const nodes = readNodes();
-      const byId = new Map();
-      nodes.forEach((node, index) => {
-        const pos = ensureNodePosition(node.id, index);
-        byId.set(node.id, { node, pos });
-      });
-
-      ctx.strokeStyle = "#3a5f76";
-      ctx.lineWidth = 2;
-      nodes.forEach((node) => {
-        const to = byId.get(node.id);
-        if (!to) return;
-        node.inputs.forEach((input) => {
-          if (input.srcNodeId === 0) return;
-          const from = byId.get(input.srcNodeId);
-          if (!from) return;
-          const x1 = from.pos.x + 132;
-          const y1 = from.pos.y + 28;
-          const x2 = to.pos.x;
-          const y2 = to.pos.y + 28;
-          const mx = (x1 + x2) * 0.5;
-          ctx.beginPath();
-          ctx.moveTo(x1, y1);
-          ctx.bezierCurveTo(mx, y1, mx, y2, x2, y2);
-          ctx.stroke();
-        });
-      });
-
-      nodes.forEach((node) => {
-        const entry = byId.get(node.id);
-        drawNode(ctx, node, entry.pos.x, entry.pos.y);
-      });
-    }
-
     function syncViews() {
       const lastError = readI32(INFO.LAST_ERROR);
       const ioText = readOutputText();
@@ -625,7 +492,7 @@ print("sum", total)
         `active_goal_count: ${readU32(INFO.ACTIVE_GOAL_COUNT)}`,
         `io_len: ${api.ng_get_io_len()} bytes`,
       ].join("\n");
-      renderGraph();
+      ui.graph.requestRenderIfGenerationChanged();
     }
 
     function setupGraph() {
@@ -633,13 +500,11 @@ print("sum", total)
       if (err !== 0) return err;
       err = api.ng_clear_graph();
       if (err !== 0) return err;
-
-      err = api.ng_node_create(1, NG.NODE_CODE);
+      err = api.ng_node_create(1, 2);
       if (err !== 0) return err;
       err = api.ng_output_add(1, 1);
       if (err !== 0) return err;
-
-      err = api.ng_node_create(2, NG.NODE_GOAL);
+      err = api.ng_node_create(2, 1);
       if (err !== 0) return err;
       err = api.ng_input_add(2, 1);
       if (err !== 0) return err;
@@ -647,7 +512,6 @@ print("sum", total)
       if (err !== 0) return err;
       err = api.ng_goal_set(2, 1);
       if (err !== 0) return err;
-
       return 0;
     }
 
@@ -664,6 +528,21 @@ print("sum", total)
       }
     }
 
+    function startGenerationWatch() {
+      let last = -1;
+      function tick() {
+        if (api && dv) {
+          const g = readU32(INFO.GENERATION);
+          if (g !== last) {
+            last = g;
+            ui.graph.requestRenderIfGenerationChanged();
+          }
+        }
+        requestAnimationFrame(tick);
+      }
+      requestAnimationFrame(tick);
+    }
+
     async function boot() {
       const fds = [
         new OpenFile(new File([])),
@@ -671,7 +550,6 @@ print("sum", total)
         ConsoleStdout.lineBuffered(() => {}),
       ];
       const wasi = new WASI(["node-runner.wasm"], [], fds);
-
       const response = await fetch("./node-runner.wasm");
       const bytes = await response.arrayBuffer();
       const { instance } = await WebAssembly.instantiate(bytes, {
@@ -701,27 +579,27 @@ print("sum", total)
       api = instance.exports;
       memory = api.memory;
       dv = new DataView(memory.buffer);
+      ui.graph.setAssets(getNodeGraphRenderAssets());
+      ui.graph.setNodeLayoutMap(nodePositions);
+      ui.graph.attachRuntime({ api, memory });
       pushEvent("boot_ok");
       const err = setupGraph();
       if (err !== 0) throw new Error(`setupGraph failed with error ${err}`);
       syncViews();
+      startGenerationWatch();
     }
 
     ui.run.addEventListener("click", () => runSource());
-
     ui.reset.addEventListener("click", () => {
       try {
         const err = setupGraph();
-        if (err !== 0) {
-          ui.error.textContent = `reset failed: ${err}`;
-        }
+        if (err !== 0) ui.error.textContent = `reset failed: ${err}`;
         syncViews();
       } catch (error) {
         ui.error.textContent = `reset trap: ${error.message}`;
         pushEvent(`reset_trap ${error.message}`);
       }
     });
-
     ui.clear.addEventListener("click", () => {
       try {
         api.ng_exec_clear_all();
@@ -731,23 +609,14 @@ print("sum", total)
         pushEvent(`clear_trap ${err.message}`);
       }
     });
-
-    ui.clearEvents.addEventListener("click", () => {
-      clearEvents();
-    });
-
+    ui.clearEvents.addEventListener("click", () => clearEvents());
     ui.snippets.forEach((button) => {
       button.addEventListener("click", () => {
         const key = button.getAttribute("data-snippet");
-        if (key && SNIPPETS[key]) {
-          ui.source.value = SNIPPETS[key];
-        }
+        if (key && SNIPPETS[key]) ui.source.value = SNIPPETS[key];
       });
     });
-
-    window.addEventListener("resize", () => {
-      renderGraph();
-    });
+    window.addEventListener("resize", () => ui.graph.requestRenderIfGenerationChanged(true));
 
     boot().catch((err) => {
       ui.meta.textContent = "boot failed";
