@@ -219,15 +219,23 @@
       display: grid;
       grid-template-rows: auto 1fr;
       gap: 10px;
+      height: calc(100dvh - 36px);
       min-height: calc(100dvh - 36px);
+      overflow: hidden;
       animation: fade-in 520ms ease;
     }
 
     .stack {
       display: grid;
       gap: 10px;
+      height: 100%;
       min-height: 0;
-      grid-template-rows: auto minmax(110px, 0.8fr) auto minmax(140px, 1fr) auto minmax(110px, 0.8fr);
+      grid-template-rows: auto minmax(90px, 0.7fr) auto minmax(120px, 0.9fr) auto minmax(90px, 0.7fr) auto minmax(120px, 0.9fr);
+      overflow: hidden;
+    }
+
+    .stack > pre {
+      min-height: 0;
     }
 
     .k {
@@ -301,11 +309,12 @@
 
       .workspace,
       .side {
+        height: auto;
         min-height: auto;
       }
 
       .stack {
-        grid-template-rows: auto minmax(95px, auto) auto minmax(120px, auto) auto minmax(95px, auto);
+        grid-template-rows: auto minmax(95px, auto) auto minmax(120px, auto) auto minmax(95px, auto) auto minmax(120px, auto);
       }
 
       textarea {
@@ -330,6 +339,7 @@
         <button id="run" class="btn-run">Run Script</button>
         <button id="reset" class="btn-reset">Reset State</button>
         <button id="clear" class="btn-clear">Clear Buffers</button>
+        <button id="clear-events" class="btn-snippet">Clear Events</button>
         <button class="btn-snippet" data-snippet="hello">Snippet: Hello</button>
         <button class="btn-snippet" data-snippet="sum">Snippet: Sum</button>
         <button class="btn-snippet" data-snippet="err">Snippet: Error</button>
@@ -357,6 +367,8 @@ print("sum", total)
         <pre id="output"></pre>
         <h2 class="k">Error</h2>
         <pre id="error"></pre>
+        <h2 class="k">Events</h2>
+        <pre id="events"></pre>
       </div>
     </aside>
   </main>
@@ -364,18 +376,15 @@ print("sum", total)
   <script type="module">
     import { WASI, File, OpenFile, ConsoleStdout } from "./wasi.js";
 
-    const ERR = {
-      0: "ok",
-      1: "bad_arg",
-      2: "compile_error",
-      3: "runtime_error",
-      4: "init_error",
+    const SNIPPETS = {
+      hello: 'print("hello from node-code")',
+      sum: 'local n = 0\nfor i = 1, 8 do\n  n = n + i\nend\nprint("sum", n)',
+      err: "error('boom from node-code')",
     };
 
-    const SNIPPETS = {
-      hello: "print(\"hello from lua\")",
-      sum: "local n = 0\nfor i = 1, 8 do\n  n = n + i\nend\nprint(\"sum\", n)",
-      err: "error('boom from snippet')",
+    const NG = {
+      NODE_GOAL: 1,
+      NODE_CODE: 2,
     };
 
     const ui = {
@@ -383,46 +392,112 @@ print("sum", total)
       run: document.getElementById("run"),
       reset: document.getElementById("reset"),
       clear: document.getElementById("clear"),
+      clearEvents: document.getElementById("clear-events"),
       meta: document.getElementById("meta"),
       output: document.getElementById("output"),
       error: document.getElementById("error"),
+      events: document.getElementById("events"),
       snippets: Array.from(document.querySelectorAll("[data-snippet]")),
     };
 
     let api = null;
     let memory = null;
+    let dv = null;
+    let sourceByNode = new Map([[1, ui.source.value]]);
+    const eventLines = [];
 
-    const te = new TextEncoder();
+    const RUN_EVENT = {
+      1: "run_started",
+      2: "node_started",
+      3: "node_succeeded",
+      4: "node_failed",
+      5: "run_finished",
+    };
+
+    function pushEvent(line) {
+      eventLines.push(line);
+      if (eventLines.length > 48) eventLines.shift();
+      ui.events.textContent = eventLines.join("\n");
+    }
+
+    function clearEvents() {
+      eventLines.length = 0;
+      ui.events.textContent = "";
+    }
+
     const td = new TextDecoder();
 
-    function readText(ptr, len) {
+    function infoPtr() {
+      return api.ng_get_info_ptr();
+    }
+
+    function readI32(off) {
+      return dv.getInt32(infoPtr() + off, true);
+    }
+
+    function readU32(off) {
+      return dv.getUint32(infoPtr() + off, true);
+    }
+
+    function readOutputText() {
+      const len = api.ng_get_io_len();
+      const ptr = api.ng_get_io_ptr();
       return td.decode(new Uint8Array(memory.buffer, ptr, len));
     }
 
-    function syncViews(errCode) {
-      const outText = readText(api.get_output_ptr(), api.get_output_len());
-      const errText = readText(api.get_error_ptr(), api.get_error_len());
-      ui.output.textContent = outText;
-      ui.error.textContent = errText;
+    function syncViews() {
+      const lastError = readI32(4);
+      const ioText = readOutputText();
+      if (lastError === 0) {
+        ui.output.textContent = ioText;
+        ui.error.textContent = "";
+      } else {
+        ui.output.textContent = "";
+        ui.error.textContent = `error code ${lastError}\n${ioText}`;
+      }
       ui.meta.textContent = [
-        `last_error: ${errCode} (${ERR[errCode] || "unknown"})`,
-        `input_cap: ${api.get_input_cap()} bytes`,
-        `output_len: ${api.get_output_len()} bytes`,
-        `error_len: ${api.get_error_len()} bytes`,
+        `last_error: ${lastError}`,
+        `generation: ${readU32(8)}`,
+        `node_count: ${readU32(12)}`,
+        `active_goal_count: ${readU32(28)}`,
+        `io_len: ${api.ng_get_io_len()} bytes`,
       ].join("\n");
     }
 
+    function setupGraph() {
+      let err = api.ng_init();
+      if (err !== 0) return err;
+      err = api.ng_clear_graph();
+      if (err !== 0) return err;
+
+      err = api.ng_node_create(1, NG.NODE_CODE);
+      if (err !== 0) return err;
+      err = api.ng_output_add(1, 1);
+      if (err !== 0) return err;
+
+      err = api.ng_node_create(2, NG.NODE_GOAL);
+      if (err !== 0) return err;
+      err = api.ng_input_add(2, 1);
+      if (err !== 0) return err;
+      err = api.ng_input_connect(2, 1, 1, 1);
+      if (err !== 0) return err;
+      err = api.ng_goal_set(2, 1);
+      if (err !== 0) return err;
+
+      return 0;
+    }
+
     function runSource() {
-      const bytes = te.encode(ui.source.value);
-      const cap = api.get_input_cap();
-      if (bytes.length > cap) {
-        ui.error.textContent = `input is too large (${bytes.length} > ${cap})`;
-        return;
+      sourceByNode.set(1, ui.source.value);
+      api.ng_exec_clear_all();
+      try {
+        api.ng_run_goal(2);
+        syncViews();
+      } catch (err) {
+        ui.output.textContent = "";
+        ui.error.textContent = `wasm trap: ${err.message}`;
+        pushEvent(`wasm_trap ${err.message}`);
       }
-      const ptr = api.get_input_ptr();
-      new Uint8Array(memory.buffer, ptr, bytes.length).set(bytes);
-      const err = api.run_input(bytes.length);
-      syncViews(err);
     }
 
     async function boot() {
@@ -437,25 +512,64 @@ print("sum", total)
       const bytes = await response.arrayBuffer();
       const { instance } = await WebAssembly.instantiate(bytes, {
         wasi_snapshot_preview1: wasi.wasiImport,
+        env: {
+          ng_on_node_changed: (nodeId, changeMask) => {
+            pushEvent(`node_changed node=${nodeId} mask=0x${changeMask.toString(16)}`);
+          },
+          ng_on_run_event: (nodeId, eventKind, errorCode) => {
+            const name = RUN_EVENT[eventKind] || `event_${eventKind}`;
+            pushEvent(`${name} node=${nodeId} err=${errorCode}`);
+          },
+          ng_host_resolve: (nodeId, resolveKind, reqPtr, reqLen, outPtr, outCap, outLenPtr) => {
+            if (!memory) return 7;
+            if (resolveKind !== 1) return 7;
+            const src = sourceByNode.get(nodeId) || "";
+            const bytes = new TextEncoder().encode(src);
+            if (bytes.length > outCap) return 4;
+            new Uint8Array(memory.buffer, outPtr, bytes.length).set(bytes);
+            new DataView(memory.buffer).setInt32(outLenPtr, bytes.length, true);
+            return 0;
+          },
+        },
       });
       wasi.start(instance);
 
       api = instance.exports;
       memory = api.memory;
-      const err = api.init_runner();
-      syncViews(err);
+      dv = new DataView(memory.buffer);
+      pushEvent("boot_ok");
+      const err = setupGraph();
+      if (err !== 0) throw new Error(`setupGraph failed with error ${err}`);
+      syncViews();
     }
 
     ui.run.addEventListener("click", () => runSource());
 
     ui.reset.addEventListener("click", () => {
-      const err = api.init_runner();
-      syncViews(err);
+      try {
+        const err = setupGraph();
+        if (err !== 0) {
+          ui.error.textContent = `reset failed: ${err}`;
+        }
+        syncViews();
+      } catch (error) {
+        ui.error.textContent = `reset trap: ${error.message}`;
+        pushEvent(`reset_trap ${error.message}`);
+      }
     });
 
     ui.clear.addEventListener("click", () => {
-      const err = api.clear_buffers();
-      syncViews(err);
+      try {
+        api.ng_exec_clear_all();
+        syncViews();
+      } catch (err) {
+        ui.error.textContent = `clear trap: ${err.message}`;
+        pushEvent(`clear_trap ${err.message}`);
+      }
+    });
+
+    ui.clearEvents.addEventListener("click", () => {
+      clearEvents();
     });
 
     ui.snippets.forEach((button) => {

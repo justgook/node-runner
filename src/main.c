@@ -2,70 +2,43 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "ng.h"
 #include "./vendor/lua/lauxlib.h"
 #include "./vendor/lua/lualib.h"
 
-#if defined(__wasm__)
-#define EXPORT(name) __attribute__((export_name(name)))
-#else
-#define EXPORT(name)
-#endif
-
-enum runner_error {
-  RUNNER_OK = 0,
-  RUNNER_ERR_BAD_ARG = 1,
-  RUNNER_ERR_COMPILE = 2,
-  RUNNER_ERR_RUNTIME = 3,
-  RUNNER_ERR_INIT = 4,
-};
-
-#define INPUT_CAP 65536
-#define OUTPUT_CAP 65536
-#define ERROR_CAP 4096
-
+static NgInfo g_info;
 static lua_State *g_lua = NULL;
-static int32_t g_last_error = RUNNER_OK;
+static char g_code_buf[NG_IO_BUFFER_CAP];
 
-static char g_input[INPUT_CAP];
-static char g_output[OUTPUT_CAP];
-static char g_error[ERROR_CAP];
-
-static int32_t g_output_len = 0;
-static int32_t g_error_len = 0;
-
-static void clear_output(void) {
-  g_output_len = 0;
-  g_output[0] = '\0';
+static void set_last_error(ng_i32 err) {
+  g_info.last_error = err;
 }
 
-static void clear_error(void) {
-  g_error_len = 0;
-  g_error[0] = '\0';
+static void notify_node_changed(ng_u32 node_id, ng_u32 change_mask) {
+  g_info.last_changed_node = node_id;
+  ng_on_node_changed(node_id, change_mask);
 }
 
-static void append_output(const char *s, size_t len) {
+static void notify_run_event(ng_u32 node_id, ng_u32 event_kind, ng_i32 error_code) {
+  g_info.last_event_kind = event_kind;
+  ng_on_run_event(node_id, event_kind, error_code);
+}
+
+static void clear_io(void) {
+  g_info.io_len = 0;
+  g_info.io_buf[0] = '\0';
+}
+
+static void append_io(const char *s, size_t len) {
   size_t cap_left;
-  if (len == 0 || g_output_len >= OUTPUT_CAP - 1)
+  if (len == 0 || g_info.io_len >= NG_IO_BUFFER_CAP - 1)
     return;
-  cap_left = (size_t)((OUTPUT_CAP - 1) - g_output_len);
+  cap_left = (size_t)((NG_IO_BUFFER_CAP - 1) - g_info.io_len);
   if (len > cap_left)
     len = cap_left;
-  memcpy(g_output + g_output_len, s, len);
-  g_output_len += (int32_t)len;
-  g_output[g_output_len] = '\0';
-}
-
-static void set_error_message(const char *s) {
-  size_t len;
-  clear_error();
-  if (s == NULL)
-    return;
-  len = strlen(s);
-  if (len > (size_t)(ERROR_CAP - 1))
-    len = (size_t)(ERROR_CAP - 1);
-  memcpy(g_error, s, len);
-  g_error_len = (int32_t)len;
-  g_error[g_error_len] = '\0';
+  memcpy(g_info.io_buf + g_info.io_len, s, len);
+  g_info.io_len += (ng_i32)len;
+  g_info.io_buf[g_info.io_len] = '\0';
 }
 
 static int lua_print_bridge(lua_State *L) {
@@ -76,12 +49,12 @@ static int lua_print_bridge(lua_State *L) {
     const char *s;
     luaL_tolstring(L, i, &len);
     s = lua_tostring(L, -1);
-    append_output(s, len);
+    append_io(s, len);
     if (i < argc)
-      append_output("\t", 1);
+      append_io("\t", 1);
     lua_pop(L, 1);
   }
-  append_output("\n", 1);
+  append_io("\n", 1);
   return 0;
 }
 
@@ -98,97 +71,575 @@ static void open_safe_libs(lua_State *L) {
   lua_pop(L, 1);
 }
 
-static int32_t map_lua_status(int status) {
-  if (status == LUA_OK)
-    return RUNNER_OK;
-  if (status == LUA_ERRSYNTAX)
-    return RUNNER_ERR_COMPILE;
-  return RUNNER_ERR_RUNTIME;
-}
-
-EXPORT("init_runner")
-int32_t init_runner(void) {
+static ng_i32 init_lua(void) {
   if (g_lua != NULL) {
     lua_close(g_lua);
     g_lua = NULL;
   }
-
-  clear_output();
-  clear_error();
-  g_last_error = RUNNER_OK;
-
   g_lua = luaL_newstate();
-  if (g_lua == NULL) {
-    g_last_error = RUNNER_ERR_INIT;
-    set_error_message("failed to create lua state");
-    return g_last_error;
-  }
-
+  if (g_lua == NULL)
+    return NG_ERR_RUNTIME;
   open_safe_libs(g_lua);
   lua_pushcfunction(g_lua, lua_print_bridge);
   lua_setglobal(g_lua, "print");
-  return RUNNER_OK;
+  return NG_OK;
 }
 
-EXPORT("run_input")
-int32_t run_input(int32_t len) {
+static NgNode *find_node(ng_u32 node_id) {
+  ng_u32 i;
+  for (i = 0; i < NG_MAX_NODES; i++) {
+    if (g_info.nodes[i].id == node_id)
+      return &g_info.nodes[i];
+  }
+  return NULL;
+}
+
+static ng_i32 find_node_index(ng_u32 node_id) {
+  ng_u32 i;
+  for (i = 0; i < NG_MAX_NODES; i++) {
+    if (g_info.nodes[i].id == node_id)
+      return (ng_i32)i;
+  }
+  return -1;
+}
+
+static NgNode *alloc_node_slot(void) {
+  ng_u32 i;
+  for (i = 0; i < NG_MAX_NODES; i++) {
+    if (g_info.nodes[i].id == 0)
+      return &g_info.nodes[i];
+  }
+  return NULL;
+}
+
+static ng_i32 find_input_index(NgNode *node, ng_u32 input_id) {
+  ng_u32 i;
+  for (i = 0; i < node->input_count; i++) {
+    if (node->inputs[i].id == input_id)
+      return (ng_i32)i;
+  }
+  return -1;
+}
+
+static ng_i32 find_output_index(NgNode *node, ng_u32 output_id) {
+  ng_u32 i;
+  for (i = 0; i < node->output_count; i++) {
+    if (node->outputs[i].id == output_id)
+      return (ng_i32)i;
+  }
+  return -1;
+}
+
+static void mark_stale_downstream(ng_u32 src_node_id) {
+  ng_u32 i;
+  ng_u32 j;
+  for (i = 0; i < NG_MAX_NODES; i++) {
+    NgNode *node = &g_info.nodes[i];
+    if (node->id == 0 || node->id == src_node_id)
+      continue;
+    for (j = 0; j < node->input_count; j++) {
+      if (node->inputs[j].src_node_id == src_node_id) {
+        if (node->exec_state == NG_EXEC_SUCCESS)
+          node->exec_state = NG_EXEC_STALE;
+        mark_stale_downstream(node->id);
+        break;
+      }
+    }
+  }
+}
+
+static ng_i32 run_lua_source(const char *src, size_t len) {
   int status;
-  const char *err;
-  if (g_lua == NULL) {
-    g_last_error = RUNNER_ERR_INIT;
-    set_error_message("runner is not initialized");
-    return g_last_error;
-  }
-  if (len < 0 || len > INPUT_CAP) {
-    g_last_error = RUNNER_ERR_BAD_ARG;
-    set_error_message("invalid input length");
-    return g_last_error;
-  }
-
-  clear_output();
-  clear_error();
-
-  status = luaL_loadbufferx(g_lua, g_input, (size_t)len, "input", "t");
-  if (status == LUA_OK) {
+  if (g_lua == NULL)
+    return NG_ERR_NOT_INITIALIZED;
+  clear_io();
+  status = luaL_loadbufferx(g_lua, src, len, "node-code", "t");
+  if (status == LUA_OK)
     status = lua_pcall(g_lua, 0, LUA_MULTRET, 0);
-  }
-
-  g_last_error = map_lua_status(status);
-  if (g_last_error != RUNNER_OK) {
-    err = lua_tostring(g_lua, -1);
-    set_error_message(err != NULL ? err : "unknown lua error");
+  if (status != LUA_OK) {
+    const char *err = lua_tostring(g_lua, -1);
+    clear_io();
+    if (err != NULL)
+      append_io(err, strlen(err));
     lua_pop(g_lua, 1);
+    return NG_ERR_RUNTIME;
   }
-  return g_last_error;
+  return NG_OK;
 }
 
-EXPORT("clear_buffers")
-int32_t clear_buffers(void) {
-  clear_output();
-  clear_error();
-  g_last_error = RUNNER_OK;
-  return RUNNER_OK;
+static ng_i32 execute_node(ng_u32 node_id, ng_u8 *visit);
+
+static ng_i32 execute_dependencies(NgNode *node, ng_u8 *visit) {
+  ng_u32 i;
+  for (i = 0; i < node->input_count; i++) {
+    NgInputPort *in = &node->inputs[i];
+    if (in->src_node_id != 0) {
+      ng_i32 err = execute_node(in->src_node_id, visit);
+      if (err != NG_OK)
+        return err;
+    }
+  }
+  return NG_OK;
 }
 
-EXPORT("get_input_ptr")
-int32_t get_input_ptr(void) { return (int32_t)(intptr_t)g_input; }
+static ng_i32 execute_node(ng_u32 node_id, ng_u8 *visit) {
+  ng_i32 idx;
+  NgNode *node;
+  ng_i32 err;
+  ng_i32 out_len;
 
-EXPORT("get_input_cap")
-int32_t get_input_cap(void) { return INPUT_CAP; }
+  idx = find_node_index(node_id);
+  if (idx < 0)
+    return NG_ERR_NOT_FOUND;
+  if (visit[idx] == 1)
+    return NG_ERR_VALIDATION;
+  if (visit[idx] == 2)
+    return NG_OK;
 
-EXPORT("get_output_ptr")
-int32_t get_output_ptr(void) { return (int32_t)(intptr_t)g_output; }
+  node = &g_info.nodes[idx];
+  visit[idx] = 1;
 
-EXPORT("get_output_len")
-int32_t get_output_len(void) { return g_output_len; }
+  if (node->exec_state == NG_EXEC_SUCCESS) {
+    visit[idx] = 2;
+    return NG_OK;
+  }
 
-EXPORT("get_error_ptr")
-int32_t get_error_ptr(void) { return (int32_t)(intptr_t)g_error; }
+  err = execute_dependencies(node, visit);
+  if (err != NG_OK) {
+    node->exec_state = NG_EXEC_ERROR;
+    node->last_error = err;
+    notify_run_event(node->id, NG_RUN_EVENT_NODE_FAILED, err);
+    visit[idx] = 2;
+    return err;
+  }
 
-EXPORT("get_error_len")
-int32_t get_error_len(void) { return g_error_len; }
+  notify_run_event(node->id, NG_RUN_EVENT_NODE_STARTED, NG_OK);
+  if (node->kind == NG_NODE_CODE) {
+    out_len = 0;
+    err = ng_host_resolve(node->id, NG_RESOLVE_CODE, NULL, 0, g_code_buf,
+                          NG_IO_BUFFER_CAP, &out_len);
+    if (err != NG_OK || out_len < 0) {
+      node->exec_state = NG_EXEC_ERROR;
+      node->last_error = NG_ERR_HOST;
+      notify_run_event(node->id, NG_RUN_EVENT_NODE_FAILED, NG_ERR_HOST);
+      visit[idx] = 2;
+      return NG_ERR_HOST;
+    }
+    err = run_lua_source(g_code_buf, (size_t)out_len);
+    if (err != NG_OK) {
+      node->exec_state = NG_EXEC_ERROR;
+      node->last_error = err;
+      notify_run_event(node->id, NG_RUN_EVENT_NODE_FAILED, err);
+      visit[idx] = 2;
+      return err;
+    }
+  }
 
-EXPORT("get_last_error")
-int32_t get_last_error(void) { return g_last_error; }
+  node->exec_state = NG_EXEC_SUCCESS;
+  node->last_error = NG_OK;
+  notify_run_event(node->id, NG_RUN_EVENT_NODE_SUCCEEDED, NG_OK);
+  visit[idx] = 2;
+  return NG_OK;
+}
+
+ng_i32 ng_init(void) {
+  memset(&g_info, 0, sizeof(g_info));
+  if (init_lua() != NG_OK) {
+    g_info.initialized = 0;
+    set_last_error(NG_ERR_RUNTIME);
+    return NG_ERR_RUNTIME;
+  }
+  g_info.initialized = 1;
+  set_last_error(NG_OK);
+  return NG_OK;
+}
+
+ng_i32 ng_get_info_ptr(void) {
+  return (ng_i32)(intptr_t)&g_info;
+}
+
+ng_i32 ng_clear_graph(void) {
+  ng_i32 initialized = g_info.initialized;
+  memset(g_info.nodes, 0, sizeof(g_info.nodes));
+  g_info.node_count = 0;
+  g_info.active_goal_count = 0;
+  clear_io();
+  g_info.generation += 1;
+  g_info.initialized = initialized;
+  set_last_error(NG_OK);
+  notify_node_changed(0, NG_CHANGE_GRAPH);
+  return NG_OK;
+}
+
+ng_i32 ng_node_create(ng_u32 node_id, ng_u32 kind) {
+  NgNode *node;
+  if (node_id == 0)
+    return NG_ERR_INVALID_ARG;
+  if (find_node(node_id) != NULL)
+    return NG_ERR_VALIDATION;
+  node = alloc_node_slot();
+  if (node == NULL)
+    return NG_ERR_CAPACITY;
+  memset(node, 0, sizeof(*node));
+  node->id = node_id;
+  node->kind = kind;
+  node->exec_state = NG_EXEC_NEVER;
+  g_info.node_count += 1;
+  g_info.generation += 1;
+  set_last_error(NG_OK);
+  notify_node_changed(node_id, NG_CHANGE_NODE_META | NG_CHANGE_GRAPH);
+  return NG_OK;
+}
+
+ng_i32 ng_node_replace(ng_u32 node_id, ng_u32 kind) {
+  NgNode *node = find_node(node_id);
+  if (node == NULL)
+    return NG_ERR_NOT_FOUND;
+  memset(node, 0, sizeof(*node));
+  node->id = node_id;
+  node->kind = kind;
+  node->exec_state = NG_EXEC_NEVER;
+  g_info.generation += 1;
+  set_last_error(NG_OK);
+  notify_node_changed(node_id, NG_CHANGE_NODE_META | NG_CHANGE_NODE_PORTS |
+                                   NG_CHANGE_NODE_ARGS |
+                                   NG_CHANGE_NODE_CONNECTIONS |
+                                   NG_CHANGE_NODE_EXEC);
+  return NG_OK;
+}
+
+ng_i32 ng_node_delete(ng_u32 node_id) {
+  ng_u32 i;
+  ng_u32 j;
+  NgNode *node = find_node(node_id);
+  if (node == NULL)
+    return NG_ERR_NOT_FOUND;
+  memset(node, 0, sizeof(*node));
+  if (g_info.node_count > 0)
+    g_info.node_count -= 1;
+  for (i = 0; i < NG_MAX_NODES; i++) {
+    NgNode *n = &g_info.nodes[i];
+    if (n->id == 0)
+      continue;
+    for (j = 0; j < n->input_count; j++) {
+      if (n->inputs[j].src_node_id == node_id) {
+        n->inputs[j].src_node_id = 0;
+        n->inputs[j].src_output_id = 0;
+        if (n->exec_state == NG_EXEC_SUCCESS)
+          n->exec_state = NG_EXEC_STALE;
+      }
+    }
+  }
+  g_info.generation += 1;
+  set_last_error(NG_OK);
+  notify_node_changed(node_id, NG_CHANGE_GRAPH);
+  return NG_OK;
+}
+
+ng_i32 ng_input_add(ng_u32 node_id, ng_u32 input_id) {
+  NgNode *node = find_node(node_id);
+  if (node == NULL)
+    return NG_ERR_NOT_FOUND;
+  if (node->input_count >= NG_MAX_INPUTS)
+    return NG_ERR_CAPACITY;
+  if (find_input_index(node, input_id) >= 0)
+    return NG_ERR_VALIDATION;
+  node->inputs[node->input_count].id = input_id;
+  node->inputs[node->input_count].src_node_id = 0;
+  node->inputs[node->input_count].src_output_id = 0;
+  node->input_count += 1;
+  node->generation += 1;
+  if (node->exec_state == NG_EXEC_SUCCESS)
+    node->exec_state = NG_EXEC_STALE;
+  mark_stale_downstream(node_id);
+  g_info.generation += 1;
+  set_last_error(NG_OK);
+  notify_node_changed(node_id, NG_CHANGE_NODE_PORTS | NG_CHANGE_NODE_EXEC);
+  return NG_OK;
+}
+
+ng_i32 ng_input_remove(ng_u32 node_id, ng_u32 input_id) {
+  ng_i32 idx;
+  NgNode *node = find_node(node_id);
+  if (node == NULL)
+    return NG_ERR_NOT_FOUND;
+  idx = find_input_index(node, input_id);
+  if (idx < 0)
+    return NG_ERR_NOT_FOUND;
+  if ((ng_u32)idx + 1 < node->input_count) {
+    memmove(&node->inputs[idx], &node->inputs[idx + 1],
+            (size_t)(node->input_count - ((ng_u32)idx + 1)) *
+                sizeof(NgInputPort));
+  }
+  node->input_count -= 1;
+  node->generation += 1;
+  if (node->exec_state == NG_EXEC_SUCCESS)
+    node->exec_state = NG_EXEC_STALE;
+  mark_stale_downstream(node_id);
+  g_info.generation += 1;
+  set_last_error(NG_OK);
+  notify_node_changed(node_id,
+                      NG_CHANGE_NODE_PORTS | NG_CHANGE_NODE_CONNECTIONS |
+                          NG_CHANGE_NODE_EXEC);
+  return NG_OK;
+}
+
+ng_i32 ng_output_add(ng_u32 node_id, ng_u32 output_id) {
+  NgNode *node = find_node(node_id);
+  if (node == NULL)
+    return NG_ERR_NOT_FOUND;
+  if (node->output_count >= NG_MAX_OUTPUTS)
+    return NG_ERR_CAPACITY;
+  if (find_output_index(node, output_id) >= 0)
+    return NG_ERR_VALIDATION;
+  node->outputs[node->output_count].id = output_id;
+  node->output_count += 1;
+  node->generation += 1;
+  if (node->exec_state == NG_EXEC_SUCCESS)
+    node->exec_state = NG_EXEC_STALE;
+  mark_stale_downstream(node_id);
+  g_info.generation += 1;
+  set_last_error(NG_OK);
+  notify_node_changed(node_id, NG_CHANGE_NODE_PORTS | NG_CHANGE_NODE_EXEC);
+  return NG_OK;
+}
+
+ng_i32 ng_output_remove(ng_u32 node_id, ng_u32 output_id) {
+  ng_i32 idx;
+  ng_u32 i;
+  ng_u32 j;
+  NgNode *node = find_node(node_id);
+  if (node == NULL)
+    return NG_ERR_NOT_FOUND;
+  idx = find_output_index(node, output_id);
+  if (idx < 0)
+    return NG_ERR_NOT_FOUND;
+  if ((ng_u32)idx + 1 < node->output_count) {
+    memmove(&node->outputs[idx], &node->outputs[idx + 1],
+            (size_t)(node->output_count - ((ng_u32)idx + 1)) *
+                sizeof(NgOutputPort));
+  }
+  node->output_count -= 1;
+  for (i = 0; i < NG_MAX_NODES; i++) {
+    NgNode *n = &g_info.nodes[i];
+    if (n->id == 0)
+      continue;
+    for (j = 0; j < n->input_count; j++) {
+      if (n->inputs[j].src_node_id == node_id &&
+          n->inputs[j].src_output_id == output_id) {
+        n->inputs[j].src_node_id = 0;
+        n->inputs[j].src_output_id = 0;
+        if (n->exec_state == NG_EXEC_SUCCESS)
+          n->exec_state = NG_EXEC_STALE;
+      }
+    }
+  }
+  node->generation += 1;
+  if (node->exec_state == NG_EXEC_SUCCESS)
+    node->exec_state = NG_EXEC_STALE;
+  mark_stale_downstream(node_id);
+  g_info.generation += 1;
+  set_last_error(NG_OK);
+  notify_node_changed(node_id,
+                      NG_CHANGE_NODE_PORTS | NG_CHANGE_NODE_CONNECTIONS |
+                          NG_CHANGE_NODE_EXEC);
+  return NG_OK;
+}
+
+ng_i32 ng_input_connect(ng_u32 node_id, ng_u32 input_id, ng_u32 src_node_id,
+                        ng_u32 src_output_id) {
+  ng_i32 in_idx;
+  NgNode *node = find_node(node_id);
+  NgNode *src = find_node(src_node_id);
+  if (node == NULL || src == NULL)
+    return NG_ERR_NOT_FOUND;
+  in_idx = find_input_index(node, input_id);
+  if (in_idx < 0)
+    return NG_ERR_NOT_FOUND;
+  if (find_output_index(src, src_output_id) < 0)
+    return NG_ERR_NOT_FOUND;
+  node->inputs[in_idx].src_node_id = src_node_id;
+  node->inputs[in_idx].src_output_id = src_output_id;
+  if (node->exec_state == NG_EXEC_SUCCESS)
+    node->exec_state = NG_EXEC_STALE;
+  mark_stale_downstream(node_id);
+  node->generation += 1;
+  g_info.generation += 1;
+  set_last_error(NG_OK);
+  notify_node_changed(node_id, NG_CHANGE_NODE_CONNECTIONS | NG_CHANGE_NODE_EXEC);
+  return NG_OK;
+}
+
+ng_i32 ng_input_disconnect(ng_u32 node_id, ng_u32 input_id) {
+  ng_i32 in_idx;
+  NgNode *node = find_node(node_id);
+  if (node == NULL)
+    return NG_ERR_NOT_FOUND;
+  in_idx = find_input_index(node, input_id);
+  if (in_idx < 0)
+    return NG_ERR_NOT_FOUND;
+  node->inputs[in_idx].src_node_id = 0;
+  node->inputs[in_idx].src_output_id = 0;
+  if (node->exec_state == NG_EXEC_SUCCESS)
+    node->exec_state = NG_EXEC_STALE;
+  mark_stale_downstream(node_id);
+  node->generation += 1;
+  g_info.generation += 1;
+  set_last_error(NG_OK);
+  notify_node_changed(node_id, NG_CHANGE_NODE_CONNECTIONS | NG_CHANGE_NODE_EXEC);
+  return NG_OK;
+}
+
+ng_i32 ng_node_set_arg(ng_u32 node_id, ng_u32 arg_index, ng_u32 type, ng_i32 a,
+                       ng_i32 b) {
+  NgNode *node = find_node(node_id);
+  if (node == NULL)
+    return NG_ERR_NOT_FOUND;
+  if (arg_index >= NG_MAX_ARGS)
+    return NG_ERR_INVALID_ARG;
+  node->args[arg_index].type = type;
+  node->args[arg_index].a = a;
+  node->args[arg_index].b = b;
+  if (arg_index + 1 > node->arg_count)
+    node->arg_count = arg_index + 1;
+  if (node->exec_state == NG_EXEC_SUCCESS)
+    node->exec_state = NG_EXEC_STALE;
+  mark_stale_downstream(node_id);
+  node->generation += 1;
+  g_info.generation += 1;
+  set_last_error(NG_OK);
+  notify_node_changed(node_id, NG_CHANGE_NODE_ARGS | NG_CHANGE_NODE_EXEC);
+  return NG_OK;
+}
+
+ng_i32 ng_goal_set(ng_u32 node_id, ng_i32 enabled) {
+  ng_u32 i;
+  NgNode *node = find_node(node_id);
+  if (node == NULL)
+    return NG_ERR_NOT_FOUND;
+  if (node->kind != NG_NODE_GOAL)
+    return NG_ERR_VALIDATION;
+
+  for (i = 0; i < g_info.active_goal_count; i++) {
+    if (g_info.active_goals[i] == node_id)
+      break;
+  }
+
+  if (enabled) {
+    if (i == g_info.active_goal_count) {
+      if (g_info.active_goal_count >= NG_MAX_NODES)
+        return NG_ERR_CAPACITY;
+      g_info.active_goals[g_info.active_goal_count] = node_id;
+      g_info.active_goal_count += 1;
+    }
+  } else if (i < g_info.active_goal_count) {
+    if (i + 1 < g_info.active_goal_count) {
+      memmove(&g_info.active_goals[i], &g_info.active_goals[i + 1],
+              (size_t)(g_info.active_goal_count - (i + 1)) * sizeof(ng_u32));
+    }
+    g_info.active_goal_count -= 1;
+  }
+
+  g_info.generation += 1;
+  set_last_error(NG_OK);
+  notify_node_changed(node_id, NG_CHANGE_GRAPH);
+  return NG_OK;
+}
+
+ng_i32 ng_run_goal(ng_u32 goal_node_id) {
+  ng_i32 err;
+  ng_u8 visit[NG_MAX_NODES];
+  NgNode *goal = find_node(goal_node_id);
+  if (goal == NULL)
+    return NG_ERR_NOT_FOUND;
+  if (goal->kind != NG_NODE_GOAL)
+    return NG_ERR_VALIDATION;
+  memset(visit, 0, sizeof(visit));
+  g_info.is_running = 1;
+  notify_run_event(0, NG_RUN_EVENT_RUN_STARTED, NG_OK);
+  err = execute_node(goal_node_id, visit);
+  g_info.is_running = 0;
+  notify_run_event(0, NG_RUN_EVENT_RUN_FINISHED, err);
+  set_last_error(err);
+  return err;
+}
+
+ng_i32 ng_run_all_goals(void) {
+  ng_u32 i;
+  ng_i32 err = NG_OK;
+  ng_u8 visit[NG_MAX_NODES];
+  memset(visit, 0, sizeof(visit));
+  g_info.is_running = 1;
+  notify_run_event(0, NG_RUN_EVENT_RUN_STARTED, NG_OK);
+  for (i = 0; i < g_info.active_goal_count; i++) {
+    err = execute_node(g_info.active_goals[i], visit);
+    if (err != NG_OK)
+      break;
+  }
+  g_info.is_running = 0;
+  notify_run_event(0, NG_RUN_EVENT_RUN_FINISHED, err);
+  set_last_error(err);
+  return err;
+}
+
+ng_i32 ng_exec_clear(ng_u32 node_id, ng_i32 recursive_downstream) {
+  ng_u32 i;
+  ng_u32 j;
+  NgNode *node = find_node(node_id);
+  if (node == NULL)
+    return NG_ERR_NOT_FOUND;
+  node->exec_state = NG_EXEC_NEVER;
+  node->last_error = NG_OK;
+  if (recursive_downstream) {
+    for (i = 0; i < NG_MAX_NODES; i++) {
+      NgNode *n = &g_info.nodes[i];
+      if (n->id == 0 || n->id == node_id)
+        continue;
+      for (j = 0; j < n->input_count; j++) {
+        if (n->inputs[j].src_node_id == node_id) {
+          ng_exec_clear(n->id, 1);
+          break;
+        }
+      }
+    }
+  }
+  g_info.generation += 1;
+  set_last_error(NG_OK);
+  notify_node_changed(node_id, NG_CHANGE_NODE_EXEC);
+  return NG_OK;
+}
+
+ng_i32 ng_exec_clear_all(void) {
+  ng_u32 i;
+  for (i = 0; i < NG_MAX_NODES; i++) {
+    if (g_info.nodes[i].id != 0) {
+      g_info.nodes[i].exec_state = NG_EXEC_NEVER;
+      g_info.nodes[i].last_error = NG_OK;
+    }
+  }
+  g_info.generation += 1;
+  set_last_error(NG_OK);
+  notify_node_changed(0, NG_CHANGE_NODE_EXEC | NG_CHANGE_GRAPH);
+  return NG_OK;
+}
+
+ng_i32 ng_get_last_error(void) {
+  return g_info.last_error;
+}
+
+ng_i32 ng_get_io_ptr(void) {
+  return (ng_i32)(intptr_t)g_info.io_buf;
+}
+
+ng_i32 ng_get_io_len(void) {
+  return g_info.io_len;
+}
+
+ng_i32 ng_get_node_exec_state(ng_u32 node_id) {
+  NgNode *node = find_node(node_id);
+  if (node == NULL)
+    return -1;
+  return (ng_i32)node->exec_state;
+}
 
 int main(void) { return 0; }

@@ -29,6 +29,7 @@ $(WASM_NAME): $(SRC)
 		-Dl_signalT=int \
 		-Isrc/shim \
 		-I$(LUA_DIR) \
+		--import-symbols \
 		-rdynamic \
 		-O ReleaseSmall \
 		-fstrip \

@@ -231,6 +231,15 @@ ng_i32 ng_exec_clear_all(void);
 NG_EXPORT("ng_get_last_error")
 ng_i32 ng_get_last_error(void);
 
+NG_EXPORT("ng_get_io_ptr")
+ng_i32 ng_get_io_ptr(void);
+
+NG_EXPORT("ng_get_io_len")
+ng_i32 ng_get_io_len(void);
+
+NG_EXPORT("ng_get_node_exec_state")
+ng_i32 ng_get_node_exec_state(ng_u32 node_id);
+
 /* ---- Host imports (implemented by host) ------------------------------ */
 
 /* compact event callbacks, no JSON */
