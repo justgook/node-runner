@@ -1,171 +1,368 @@
 <!DOCTYPE html>
 <html lang="en">
-
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Node Runner Lua WASM</title>
   <style>
     :root {
-      --bg: #f6f3ee;
-      --ink: #2c251f;
-      --muted: #6d6459;
-      --panel: #fffaf2;
-      --line: #d5c7b2;
-      --accent: #1f7a63;
-      --accent-2: #ba7a20;
-      --error: #a7332d;
+      --bg-0: #08131a;
+      --bg-1: #0d1f29;
+      --bg-2: #153746;
+      --panel: #0f222e;
+      --panel-2: #132c3a;
+      --ink: #d7ecf8;
+      --muted: #89a6b7;
+      --line: #284a5f;
+      --accent: #2cc9aa;
+      --accent-2: #26a7ff;
+      --warn: #ffbf47;
+      --error: #ff6b6b;
+      --ok: #5fe09a;
+      --mono: "JetBrains Mono", "IBM Plex Mono", "Fira Code", monospace;
+      --sans: "Sora", "IBM Plex Sans", "Avenir Next", "Segoe UI", sans-serif;
     }
 
     * {
       box-sizing: border-box;
     }
 
+    html,
+    body {
+      min-height: 100%;
+    }
+
     body {
       margin: 0;
       color: var(--ink);
-      font-family: "IBM Plex Sans", "Avenir Next", "Segoe UI", sans-serif;
+      font-family: var(--sans);
       background:
-        radial-gradient(circle at 0% 0%, #fff8eb, transparent 40%),
-        radial-gradient(circle at 90% 0%, #e9f7f3, transparent 35%),
-        var(--bg);
+        radial-gradient(1200px 500px at 5% -10%, rgba(44, 201, 170, 0.18), transparent 60%),
+        radial-gradient(900px 450px at 95% 0%, rgba(38, 167, 255, 0.14), transparent 60%),
+        linear-gradient(180deg, var(--bg-0), var(--bg-1) 50%, var(--bg-2));
+      background-attachment: fixed;
+    }
+
+    .scanlines {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      opacity: 0.2;
+      background: repeating-linear-gradient(
+        to bottom,
+        rgba(255, 255, 255, 0.04) 0px,
+        rgba(255, 255, 255, 0.04) 1px,
+        transparent 1px,
+        transparent 4px
+      );
+      z-index: 0;
     }
 
     .app {
-      min-height: 100dvh;
-      max-width: 1080px;
+      position: relative;
+      z-index: 1;
+      max-width: 1220px;
       margin: 0 auto;
-      padding: 16px;
+      padding: 18px;
+      min-height: 100dvh;
       display: grid;
-      grid-template-columns: 1fr 320px;
       gap: 14px;
+      grid-template-columns: minmax(0, 1fr) 340px;
     }
 
-    .panel {
+    .card {
       border: 1px solid var(--line);
       border-radius: 14px;
-      background: color-mix(in srgb, var(--panel) 92%, white);
-      box-shadow: 0 8px 22px rgba(41, 31, 20, 0.08);
-      padding: 12px;
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 40%),
+        var(--panel);
+      box-shadow: 0 14px 32px rgba(0, 0, 0, 0.28), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+    }
+
+    .workspace {
+      display: grid;
+      grid-template-rows: auto auto 1fr;
+      min-height: calc(100dvh - 36px);
+      overflow: hidden;
+    }
+
+    .head {
+      padding: 14px 14px 10px;
+      border-bottom: 1px solid var(--line);
       display: flex;
-      flex-direction: column;
+      align-items: center;
+      justify-content: space-between;
       gap: 10px;
+      animation: fade-in 380ms ease;
     }
 
-    h1 {
+    .title {
       margin: 0;
-      font-size: 16px;
-      letter-spacing: 0.02em;
-      font-family: "IBM Plex Mono", "JetBrains Mono", monospace;
+      font-size: 15px;
       text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-family: var(--mono);
+      font-weight: 700;
     }
 
-    p {
-      margin: 0;
+    .subtitle {
+      margin: 3px 0 0;
       color: var(--muted);
-      font-size: 13px;
+      font-size: 12px;
+    }
+
+    .chip {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: #b8d4e4;
+      border: 1px solid #2e5268;
+      background: rgba(38, 167, 255, 0.12);
+      border-radius: 999px;
+      padding: 4px 9px;
+      white-space: nowrap;
+    }
+
+    .toolbar {
+      position: sticky;
+      top: 0;
+      z-index: 2;
+      border-bottom: 1px solid var(--line);
+      background: linear-gradient(180deg, rgba(17, 42, 56, 0.98), rgba(15, 34, 46, 0.96));
+      backdrop-filter: blur(6px);
+      padding: 10px 14px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      animation: slide-in 360ms ease;
+    }
+
+    button {
+      border: 1px solid transparent;
+      border-radius: 10px;
+      min-height: 34px;
+      padding: 7px 12px;
+      font: 600 13px/1 var(--sans);
+      color: #d9f1ff;
+      cursor: pointer;
+      transition: transform 140ms ease, filter 140ms ease, border-color 140ms ease;
+      will-change: transform;
+    }
+
+    button:hover {
+      transform: translateY(-1px);
+      filter: brightness(1.06);
+    }
+
+    button:active {
+      transform: translateY(0);
+    }
+
+    button:focus-visible {
+      outline: none;
+      border-color: #7dd6ff;
+      box-shadow: 0 0 0 2px rgba(125, 214, 255, 0.25);
+    }
+
+    .btn-run {
+      background: linear-gradient(180deg, #25c8a8, #168c75);
+    }
+
+    .btn-reset {
+      background: linear-gradient(180deg, #2a8ad4, #1a5d93);
+    }
+
+    .btn-clear {
+      background: linear-gradient(180deg, #be8a2e, #7f591b);
+    }
+
+    .btn-snippet {
+      background: linear-gradient(180deg, #294556, #1c303d);
+      border-color: #355c72;
+      color: #c9dfec;
+      font-weight: 500;
+    }
+
+    .editor-wrap {
+      padding: 12px 14px 14px;
+      display: grid;
+      grid-template-rows: 1fr;
+      min-height: 0;
+      animation: fade-in 420ms ease;
     }
 
     textarea {
       width: 100%;
-      min-height: 280px;
-      border: 1px solid var(--line);
-      border-radius: 10px;
+      min-height: 300px;
+      height: 100%;
       resize: vertical;
-      padding: 10px;
-      font-family: "IBM Plex Mono", "JetBrains Mono", monospace;
-      font-size: 13px;
-      color: var(--ink);
-      background: #fff;
+      border: 1px solid #34576b;
+      border-radius: 12px;
+      padding: 12px;
+      color: #dff5ff;
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 60%),
+        #0c1c26;
+      font: 500 13px/1.55 var(--mono);
+      caret-color: #74e9d2;
+      tab-size: 2;
+      box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.02);
     }
 
-    .row {
-      display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
+    textarea:focus-visible {
+      outline: none;
+      border-color: #57bfd0;
+      box-shadow: 0 0 0 2px rgba(87, 191, 208, 0.22);
     }
 
-    button {
-      border: 1px solid var(--line);
-      border-radius: 8px;
-      min-height: 34px;
-      padding: 6px 10px;
-      cursor: pointer;
-      color: #fff;
-      font: inherit;
-      background: linear-gradient(180deg, var(--accent), #185848);
+    .side {
+      padding: 12px;
+      display: grid;
+      grid-template-rows: auto 1fr;
+      gap: 10px;
+      min-height: calc(100dvh - 36px);
+      animation: fade-in 520ms ease;
     }
 
-    button.secondary {
-      background: linear-gradient(180deg, #717d8c, #576171);
+    .stack {
+      display: grid;
+      gap: 10px;
+      min-height: 0;
+      grid-template-rows: auto minmax(110px, 0.8fr) auto minmax(140px, 1fr) auto minmax(110px, 0.8fr);
     }
 
-    button.warn {
-      background: linear-gradient(180deg, var(--accent-2), #985f13);
+    .k {
+      margin: 0;
+      font: 700 11px/1 var(--mono);
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #9ec2d6;
     }
 
     pre {
       margin: 0;
-      border: 1px solid var(--line);
-      border-radius: 10px;
-      background: #fff;
       padding: 10px;
-      min-height: 110px;
-      max-height: 260px;
+      border-radius: 11px;
+      border: 1px solid #34566a;
+      background: #0b1922;
       overflow: auto;
       white-space: pre-wrap;
-      font-family: "IBM Plex Mono", "JetBrains Mono", monospace;
-      font-size: 12px;
+      font: 500 12px/1.45 var(--mono);
+      color: #d3ebf8;
     }
 
-    .error {
-      border-color: color-mix(in srgb, var(--error) 35%, var(--line));
+    #meta {
+      border-color: #325d75;
     }
 
-    @media (max-width: 920px) {
+    #output {
+      border-color: #2f6b61;
+      color: #d5ffee;
+    }
+
+    #error {
+      border-color: #78414a;
+      color: #ffd8dd;
+      background: #1a1014;
+    }
+
+    .legend {
+      margin: 0;
+      color: #88a9bb;
+      font-size: 11px;
+      line-height: 1.35;
+    }
+
+    @keyframes fade-in {
+      from {
+        opacity: 0;
+        transform: translateY(6px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    @keyframes slide-in {
+      from {
+        opacity: 0;
+        transform: translateY(-5px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    @media (max-width: 980px) {
       .app {
         grid-template-columns: 1fr;
       }
 
+      .workspace,
+      .side {
+        min-height: auto;
+      }
+
+      .stack {
+        grid-template-rows: auto minmax(95px, auto) auto minmax(120px, auto) auto minmax(95px, auto);
+      }
+
       textarea {
-        min-height: 220px;
+        min-height: 240px;
       }
     }
   </style>
 </head>
-
 <body>
-  <div class="app">
-    <section class="panel">
-      <h1>Node Runner Lua WASM</h1>
-      <p>First hello-world target: execute Lua code in browser through WebAssembly.</p>
-      <textarea id="source">print("hello from lua")
+  <div class="scanlines"></div>
+  <main class="app">
+    <section class="card workspace">
+      <header class="head">
+        <div>
+          <h1 class="title">Node Runner Lua WASM</h1>
+          <p class="subtitle">Local-only runtime. No external dependencies.</p>
+        </div>
+        <span class="chip">WASM + Lua</span>
+      </header>
 
-        local total = 0
-        for i = 1, 5 do
-        total = total + i
-        end
-        print("sum", total)
-      </textarea>
-      <div class="row">
-        <button id="run">Run</button>
-        <button id="reset" class="secondary">Reset Lua State</button>
-        <button id="clear" class="warn">Clear Output</button>
+      <div class="toolbar">
+        <button id="run" class="btn-run">Run Script</button>
+        <button id="reset" class="btn-reset">Reset State</button>
+        <button id="clear" class="btn-clear">Clear Buffers</button>
+        <button class="btn-snippet" data-snippet="hello">Snippet: Hello</button>
+        <button class="btn-snippet" data-snippet="sum">Snippet: Sum</button>
+        <button class="btn-snippet" data-snippet="err">Snippet: Error</button>
+      </div>
+
+      <div class="editor-wrap">
+        <textarea id="source">print("hello from lua")
+
+local total = 0
+for i = 1, 5 do
+  total = total + i
+end
+
+print("sum", total)
+</textarea>
       </div>
     </section>
 
-    <aside class="panel">
-      <h1>Status</h1>
-      <pre id="meta">booting...</pre>
-      <h1>Output</h1>
-      <pre id="output"></pre>
-      <h1>Error</h1>
-      <pre id="error" class="error"></pre>
+    <aside class="card side">
+      <p class="legend">Run valid Lua snippets for stable behavior in this minimal target.</p>
+      <div class="stack">
+        <h2 class="k">Status</h2>
+        <pre id="meta">booting...</pre>
+        <h2 class="k">Output</h2>
+        <pre id="output"></pre>
+        <h2 class="k">Error</h2>
+        <pre id="error"></pre>
+      </div>
     </aside>
-  </div>
+  </main>
 
   <script type="module">
-    import {WASI, File, OpenFile, ConsoleStdout} from "./wasi.js";
+    import { WASI, File, OpenFile, ConsoleStdout } from "./wasi.js";
 
     const ERR = {
       0: "ok",
@@ -173,6 +370,12 @@
       2: "compile_error",
       3: "runtime_error",
       4: "init_error",
+    };
+
+    const SNIPPETS = {
+      hello: "print(\"hello from lua\")",
+      sum: "local n = 0\nfor i = 1, 8 do\n  n = n + i\nend\nprint(\"sum\", n)",
+      err: "error('boom from snippet')",
     };
 
     const ui = {
@@ -183,6 +386,7 @@
       meta: document.getElementById("meta"),
       output: document.getElementById("output"),
       error: document.getElementById("error"),
+      snippets: Array.from(document.querySelectorAll("[data-snippet]")),
     };
 
     let api = null;
@@ -224,17 +428,18 @@
     async function boot() {
       const fds = [
         new OpenFile(new File([])),
-        ConsoleStdout.lineBuffered(() => { }),
-        ConsoleStdout.lineBuffered(() => { }),
+        ConsoleStdout.lineBuffered(() => {}),
+        ConsoleStdout.lineBuffered(() => {}),
       ];
       const wasi = new WASI(["node-runner.wasm"], [], fds);
 
       const response = await fetch("./node-runner.wasm");
       const bytes = await response.arrayBuffer();
-      const {instance} = await WebAssembly.instantiate(bytes, {
+      const { instance } = await WebAssembly.instantiate(bytes, {
         wasi_snapshot_preview1: wasi.wasiImport,
       });
       wasi.start(instance);
+
       api = instance.exports;
       memory = api.memory;
       const err = api.init_runner();
@@ -242,13 +447,24 @@
     }
 
     ui.run.addEventListener("click", () => runSource());
+
     ui.reset.addEventListener("click", () => {
       const err = api.init_runner();
       syncViews(err);
     });
+
     ui.clear.addEventListener("click", () => {
       const err = api.clear_buffers();
       syncViews(err);
+    });
+
+    ui.snippets.forEach((button) => {
+      button.addEventListener("click", () => {
+        const key = button.getAttribute("data-snippet");
+        if (key && SNIPPETS[key]) {
+          ui.source.value = SNIPPETS[key];
+        }
+      });
     });
 
     boot().catch((err) => {
@@ -258,5 +474,4 @@
     });
   </script>
 </body>
-
 </html>
