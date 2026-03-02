@@ -148,9 +148,6 @@ typedef struct {
   ng_u32 generation;
 
   ng_u32 node_count;
-  ng_u32 last_changed_node;
-  ng_u32 last_event_kind;
-
   ng_i32 is_running;
   ng_u32 active_goal_count;
   ng_u32 active_goals[NG_MAX_NODES];

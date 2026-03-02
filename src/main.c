@@ -15,12 +15,10 @@ static void set_last_error(ng_i32 err) {
 }
 
 static void notify_node_changed(ng_u32 node_id, ng_u32 change_mask) {
-  g_info.last_changed_node = node_id;
   ng_on_node_changed(node_id, change_mask);
 }
 
 static void notify_run_event(ng_u32 node_id, ng_u32 event_kind, ng_i32 error_code) {
-  g_info.last_event_kind = event_kind;
   ng_on_run_event(node_id, event_kind, error_code);
 }
 
