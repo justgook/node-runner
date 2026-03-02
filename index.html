@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Node Runner Lua WASM</title>
+  <style>
+    :root {
+      --bg: #f6f3ee;
+      --ink: #2c251f;
+      --muted: #6d6459;
+      --panel: #fffaf2;
+      --line: #d5c7b2;
+      --accent: #1f7a63;
+      --accent-2: #ba7a20;
+      --error: #a7332d;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      font-family: "IBM Plex Sans", "Avenir Next", "Segoe UI", sans-serif;
+      background:
+        radial-gradient(circle at 0% 0%, #fff8eb, transparent 40%),
+        radial-gradient(circle at 90% 0%, #e9f7f3, transparent 35%),
+        var(--bg);
+    }
+
+    .app {
+      min-height: 100dvh;
+      max-width: 1080px;
+      margin: 0 auto;
+      padding: 16px;
+      display: grid;
+      grid-template-columns: 1fr 320px;
+      gap: 14px;
+    }
+
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: color-mix(in srgb, var(--panel) 92%, white);
+      box-shadow: 0 8px 22px rgba(41, 31, 20, 0.08);
+      padding: 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 16px;
+      letter-spacing: 0.02em;
+      font-family: "IBM Plex Mono", "JetBrains Mono", monospace;
+      text-transform: uppercase;
+    }
+
+    p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+
+    textarea {
+      width: 100%;
+      min-height: 280px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      resize: vertical;
+      padding: 10px;
+      font-family: "IBM Plex Mono", "JetBrains Mono", monospace;
+      font-size: 13px;
+      color: var(--ink);
+      background: #fff;
+    }
+
+    .row {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    button {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      min-height: 34px;
+      padding: 6px 10px;
+      cursor: pointer;
+      color: #fff;
+      font: inherit;
+      background: linear-gradient(180deg, var(--accent), #185848);
+    }
+
+    button.secondary {
+      background: linear-gradient(180deg, #717d8c, #576171);
+    }
+
+    button.warn {
+      background: linear-gradient(180deg, var(--accent-2), #985f13);
+    }
+
+    pre {
+      margin: 0;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #fff;
+      padding: 10px;
+      min-height: 110px;
+      max-height: 260px;
+      overflow: auto;
+      white-space: pre-wrap;
+      font-family: "IBM Plex Mono", "JetBrains Mono", monospace;
+      font-size: 12px;
+    }
+
+    .error {
+      border-color: color-mix(in srgb, var(--error) 35%, var(--line));
+    }
+
+    @media (max-width: 920px) {
+      .app {
+        grid-template-columns: 1fr;
+      }
+
+      textarea {
+        min-height: 220px;
+      }
+    }
+  </style>
+</head>
+
+<body>
+  <div class="app">
+    <section class="panel">
+      <h1>Node Runner Lua WASM</h1>
+      <p>First hello-world target: execute Lua code in browser through WebAssembly.</p>
+      <textarea id="source">print("hello from lua")
+
+        local total = 0
+        for i = 1, 5 do
+        total = total + i
+        end
+        print("sum", total)
+      </textarea>
+      <div class="row">
+        <button id="run">Run</button>
+        <button id="reset" class="secondary">Reset Lua State</button>
+        <button id="clear" class="warn">Clear Output</button>
+      </div>
+    </section>
+
+    <aside class="panel">
+      <h1>Status</h1>
+      <pre id="meta">booting...</pre>
+      <h1>Output</h1>
+      <pre id="output"></pre>
+      <h1>Error</h1>
+      <pre id="error" class="error"></pre>
+    </aside>
+  </div>
+
+  <script type="module">
+    import {WASI, File, OpenFile, ConsoleStdout} from "./wasi.js";
+
+    const ERR = {
+      0: "ok",
+      1: "bad_arg",
+      2: "compile_error",
+      3: "runtime_error",
+      4: "init_error",
+    };
+
+    const ui = {
+      source: document.getElementById("source"),
+      run: document.getElementById("run"),
+      reset: document.getElementById("reset"),
+      clear: document.getElementById("clear"),
+      meta: document.getElementById("meta"),
+      output: document.getElementById("output"),
+      error: document.getElementById("error"),
+    };
+
+    let api = null;
+    let memory = null;
+
+    const te = new TextEncoder();
+    const td = new TextDecoder();
+
+    function readText(ptr, len) {
+      return td.decode(new Uint8Array(memory.buffer, ptr, len));
+    }
+
+    function syncViews(errCode) {
+      const outText = readText(api.get_output_ptr(), api.get_output_len());
+      const errText = readText(api.get_error_ptr(), api.get_error_len());
+      ui.output.textContent = outText;
+      ui.error.textContent = errText;
+      ui.meta.textContent = [
+        `last_error: ${errCode} (${ERR[errCode] || "unknown"})`,
+        `input_cap: ${api.get_input_cap()} bytes`,
+        `output_len: ${api.get_output_len()} bytes`,
+        `error_len: ${api.get_error_len()} bytes`,
+      ].join("\n");
+    }
+
+    function runSource() {
+      const bytes = te.encode(ui.source.value);
+      const cap = api.get_input_cap();
+      if (bytes.length > cap) {
+        ui.error.textContent = `input is too large (${bytes.length} > ${cap})`;
+        return;
+      }
+      const ptr = api.get_input_ptr();
+      new Uint8Array(memory.buffer, ptr, bytes.length).set(bytes);
+      const err = api.run_input(bytes.length);
+      syncViews(err);
+    }
+
+    async function boot() {
+      const fds = [
+        new OpenFile(new File([])),
+        ConsoleStdout.lineBuffered(() => { }),
+        ConsoleStdout.lineBuffered(() => { }),
+      ];
+      const wasi = new WASI(["node-runner.wasm"], [], fds);
+
+      const response = await fetch("./node-runner.wasm");
+      const bytes = await response.arrayBuffer();
+      const {instance} = await WebAssembly.instantiate(bytes, {
+        wasi_snapshot_preview1: wasi.wasiImport,
+      });
+      wasi.start(instance);
+      api = instance.exports;
+      memory = api.memory;
+      const err = api.init_runner();
+      syncViews(err);
+    }
+
+    ui.run.addEventListener("click", () => runSource());
+    ui.reset.addEventListener("click", () => {
+      const err = api.init_runner();
+      syncViews(err);
+    });
+    ui.clear.addEventListener("click", () => {
+      const err = api.clear_buffers();
+      syncViews(err);
+    });
+
+    boot().catch((err) => {
+      ui.meta.textContent = "boot failed";
+      ui.error.textContent = err.message;
+      console.error(err);
+    });
+  </script>
+</body>
+
+</html>
