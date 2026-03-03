@@ -30,6 +30,7 @@ const NODE = {
   KIND: 4,
   EXEC_STATE: 8,
   INPUT_COUNT: 20,
+  OUTPUT_COUNT: 24,
 };
 
 const MIN_SCALE = 0.2;
@@ -134,6 +135,8 @@ class NodeGraphCanvasElement extends HTMLElement {
 
     this.textAtlas = null;
     this.skinTexture = null;
+    this.portTextures = null;
+    this.portLabels = new Map();
 
     this._onWheel = this._onWheel.bind(this);
     this._onPointerDown = this._onPointerDown.bind(this);
@@ -168,7 +171,11 @@ class NodeGraphCanvasElement extends HTMLElement {
   setAssets(assets) {
     this.assets = assets;
     if (this.gl) {
-      Promise.all([this._loadNineSliceTextureFromAssets(), this._loadTextAtlasFromAssets()])
+      Promise.all([
+        this._loadNineSliceTextureFromAssets(),
+        this._loadTextAtlasFromAssets(),
+        this._loadPortTexturesFromAssets(),
+      ])
         .then(() => this.requestRenderIfGenerationChanged(true))
         .catch((err) => {
           console.error("graph asset load failed", err);
@@ -178,6 +185,11 @@ class NodeGraphCanvasElement extends HTMLElement {
 
   setNodeLayoutMap(map) {
     this.nodeLayout = map;
+    this.requestRenderIfGenerationChanged(true);
+  }
+
+  setPortLabelMap(map) {
+    this.portLabels = map || new Map();
     this.requestRenderIfGenerationChanged(true);
   }
 
@@ -419,6 +431,36 @@ class NodeGraphCanvasElement extends HTMLElement {
       }`
     );
 
+    this.spriteProgram = createProgram(
+      gl,
+      `#version 300 es
+      precision highp float;
+      layout(location=0) in vec2 a_uv;
+      layout(location=1) in vec4 a_rect;
+      layout(location=2) in vec4 a_uvRect;
+      uniform mat3 u_view;
+      uniform vec2 u_viewportPx;
+      out vec2 v_uv;
+      void main() {
+        vec2 world = a_rect.xy + a_uv * a_rect.zw;
+        vec2 screen = (u_view * vec3(world, 1.0)).xy;
+        v_uv = a_uvRect.xy + a_uv * a_uvRect.zw;
+        vec2 ndc = (screen / u_viewportPx) * 2.0 - 1.0;
+        ndc.y = -ndc.y;
+        gl_Position = vec4(ndc, 0.0, 1.0);
+      }`,
+      `#version 300 es
+      precision highp float;
+      in vec2 v_uv;
+      uniform sampler2D u_tex;
+      out vec4 outColor;
+      void main() {
+        vec4 tex = texture(u_tex, v_uv);
+        if (tex.a < 0.001) discard;
+        outColor = tex;
+      }`
+    );
+
     this.textProgram = createProgram(
       gl,
       `#version 300 es
@@ -490,36 +532,61 @@ class NodeGraphCanvasElement extends HTMLElement {
 
     this.edgeBuffer = gl.createBuffer();
     this.nodeBuffer = gl.createBuffer();
+    this.spriteBuffer = gl.createBuffer();
     this.textAtlas = null;
   }
 
-  async _loadNineSliceTextureFromAssets() {
-    if (!this.gl || !this.assets) return;
+  async _loadTextureFromUrl(url) {
+    const res = await fetch(url, { cache: "no-cache" });
+    if (!res.ok) {
+      throw new Error(`failed to fetch ${url}: ${res.status}`);
+    }
+    const blob = await res.blob();
+    const image = await createImageBitmap(blob);
+
     const gl = this.gl;
-    const cfg = this.assets.nineSlice;
-    const textureUrl = cfg?.textureUrl;
-    if (!textureUrl) {
-      throw new Error("missing nineSlice.textureUrl");
-    }
-
-    const textureRes = await fetch(textureUrl, { cache: "no-cache" });
-    if (!textureRes.ok) {
-      throw new Error(`failed to fetch ${textureUrl}: ${textureRes.status}`);
-    }
-    const textureBlob = await textureRes.blob();
-    const textureImage = await createImageBitmap(textureBlob);
-
     const tex = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, tex);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, textureImage);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, image);
+    return { texture: tex, width: image.width, height: image.height };
+  }
+
+  async _loadNineSliceTextureFromAssets() {
+    if (!this.gl || !this.assets) return;
+    const cfg = this.assets.nineSlice;
+    const textureUrl = cfg?.textureUrl;
+    if (!textureUrl) {
+      throw new Error("missing nineSlice.textureUrl");
+    }
+
+    const gl = this.gl;
+    const texInfo = await this._loadTextureFromUrl(textureUrl);
     if (this.skinTexture?.texture) {
       gl.deleteTexture(this.skinTexture.texture);
     }
-    this.skinTexture = { texture: tex, width: textureImage.width, height: textureImage.height };
+    this.skinTexture = texInfo;
+  }
+
+  async _loadPortTexturesFromAssets() {
+    if (!this.gl || !this.assets?.ports) return;
+    const gl = this.gl;
+    const cfg = this.assets.ports;
+    if (!cfg.emptyIconUrl || !cfg.fullIconUrl) {
+      throw new Error("missing ports.emptyIconUrl or ports.fullIconUrl");
+    }
+
+    const [empty, full] = await Promise.all([
+      this._loadTextureFromUrl(cfg.emptyIconUrl),
+      this._loadTextureFromUrl(cfg.fullIconUrl),
+    ]);
+
+    if (this.portTextures?.empty?.texture) gl.deleteTexture(this.portTextures.empty.texture);
+    if (this.portTextures?.full?.texture) gl.deleteTexture(this.portTextures.full.texture);
+    this.portTextures = { empty, full };
   }
 
   async _loadTextAtlasFromAssets() {
@@ -563,9 +630,13 @@ class NodeGraphCanvasElement extends HTMLElement {
 
   _ensureLayout(nodeId, index) {
     if (this.nodeLayout.has(nodeId)) return this.nodeLayout.get(nodeId);
-    const col = index % 4;
-    const row = Math.floor(index / 4);
-    const pos = { x: 80 + col * 186, y: 58 + row * 112 };
+    const layout = this.assets.layout;
+    const col = index % layout.gridColumns;
+    const row = Math.floor(index / layout.gridColumns);
+    const pos = {
+      x: layout.gridOriginX + col * layout.gridStepX,
+      y: layout.gridOriginY + row * layout.gridStepY,
+    };
     this.nodeLayout.set(nodeId, pos);
     return pos;
   }
@@ -581,7 +652,8 @@ class NodeGraphCanvasElement extends HTMLElement {
       const kind = this.dv.getUint32(base + NODE.KIND, true);
       const execState = this.dv.getUint32(base + NODE.EXEC_STATE, true);
       const inputCount = this.dv.getUint32(base + NODE.INPUT_COUNT, true);
-      const node = { id, kind, execState, inputCount, inputs: [] };
+      const outputCount = this.dv.getUint32(base + NODE.OUTPUT_COUNT, true);
+      const node = { id, kind, execState, inputCount, outputCount, inputs: [], outputs: [] };
 
       for (let j = 0; j < inputCount; j++) {
         const inBase = base + ABI.NODE_HEADER_SIZE + j * ABI.INPUT_PORT_SIZE;
@@ -589,7 +661,21 @@ class NodeGraphCanvasElement extends HTMLElement {
         const srcNodeId = this.dv.getUint32(inBase + 4, true);
         const srcOutputId = this.dv.getUint32(inBase + 8, true);
         node.inputs.push({ inputId, srcNodeId, srcOutputId });
-        if (srcNodeId) edges.push({ from: srcNodeId, to: id, execState });
+        if (srcNodeId) {
+          edges.push({
+            from: srcNodeId,
+            fromOutputId: srcOutputId,
+            to: id,
+            toInputId: inputId,
+            execState,
+          });
+        }
+      }
+
+      const outputsBase = base + ABI.NODE_HEADER_SIZE + NG.MAX_INPUTS * ABI.INPUT_PORT_SIZE;
+      for (let j = 0; j < outputCount; j++) {
+        const outputId = this.dv.getUint32(outputsBase + j * ABI.OUTPUT_PORT_SIZE, true);
+        node.outputs.push({ outputId });
       }
       nodes.push(node);
     }
@@ -622,26 +708,93 @@ class NodeGraphCanvasElement extends HTMLElement {
     gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
 
     const view = this._viewMatrix();
-    this._drawEdges(graph.edges, posById, width, height, view);
+    this._drawEdges(graph.nodes, graph.edges, posById, width, height, view);
     this._drawNodes(graph.nodes, posById, width, height, view);
+    this._drawPorts(graph.nodes, graph.edges, posById, width, height, view);
     this._drawLabels(graph.nodes, posById, width, height, view);
   }
 
-  _drawEdges(edges, posById, width, height, view) {
+  _getInputIndex(node, inputId) {
+    if (!node?.inputs?.length) return 0;
+    const idx = node.inputs.findIndex((port) => port.inputId === inputId);
+    return idx >= 0 ? idx : 0;
+  }
+
+  _getOutputIndex(node, outputId) {
+    if (!node?.outputs?.length) return 0;
+    const idx = node.outputs.findIndex((port) => port.outputId === outputId);
+    return idx >= 0 ? idx : 0;
+  }
+
+  _getNodeSize(node) {
+    const nodeCfg = this.assets.node;
+    const layout = this.assets.layout || {};
+    const ports = this.assets.ports;
+    const width = Number(nodeCfg.width || 146);
+    const minHeight = Number(nodeCfg.minHeight || nodeCfg.height || 62);
+    const rowCount = Math.max(node.inputCount || 0, node.outputCount || 0);
+    if (rowCount <= 0) return { width, height: minHeight };
+
+    const rowStartY = Number(ports.rowStartY || ((layout.nodeHeaderHeight || 28) + 2));
+    const spacingY = Number(ports.spacingY || 18);
+    const iconSizePx = Number(ports.iconSizePx || 12);
+    const nodePaddingY = Number(layout.nodePaddingY || 8);
+    const lastPortCenterY = rowStartY + (rowCount - 1) * spacingY;
+    const requiredHeight = lastPortCenterY + iconSizePx * 0.5 + nodePaddingY;
+    return { width, height: Math.max(minHeight, Math.ceil(requiredHeight)) };
+  }
+
+  _getPortCenter(node, pos, isInput, portIndex) {
+    const cfg = this.assets.ports;
+    const nodeSize = this._getNodeSize(node);
+    const x = isInput ? pos.x + cfg.inputInsetX : pos.x + nodeSize.width - cfg.outputInsetX;
+    const y = pos.y + cfg.rowStartY + portIndex * cfg.spacingY;
+    return { x, y };
+  }
+
+  _getNodePortLabels(nodeId) {
+    if (!this.portLabels) return null;
+    if (this.portLabels instanceof Map) {
+      return this.portLabels.get(nodeId) || this.portLabels.get(String(nodeId)) || null;
+    }
+    return this.portLabels[nodeId] || this.portLabels[String(nodeId)] || null;
+  }
+
+  _getPortLabel(nodeId, direction, portId, index) {
+    const labels = this._getNodePortLabels(nodeId);
+    const dict = labels ? labels[direction === "input" ? "inputs" : "outputs"] : null;
+    const key = String(portId);
+    if (dict instanceof Map) {
+      if (dict.has(portId)) return String(dict.get(portId));
+      if (dict.has(key)) return String(dict.get(key));
+    } else if (dict && typeof dict === "object") {
+      if (dict[portId] !== undefined) return String(dict[portId]);
+      if (dict[key] !== undefined) return String(dict[key]);
+    }
+    return `${direction === "input" ? "in" : "out"} ${portId || index + 1}`;
+  }
+
+  _drawEdges(nodes, edges, posById, width, height, view) {
     const gl = this.gl;
     if (!edges.length) return;
-    const nodeCfg = this.assets.node;
     const edgeCfg = this.assets.edge;
+    const nodesById = new Map(nodes.map((node) => [node.id, node]));
     const data = new Float32Array(edges.length * 10);
     let o = 0;
     for (const edge of edges) {
       const from = posById.get(edge.from);
       const to = posById.get(edge.to);
       if (!from || !to) continue;
-      const p0x = from.x + nodeCfg.width;
-      const p0y = from.y + nodeCfg.height * 0.5;
-      const p3x = to.x;
-      const p3y = to.y + nodeCfg.height * 0.5;
+      const fromNode = nodesById.get(edge.from);
+      const toNode = nodesById.get(edge.to);
+      const fromPortIndex = this._getOutputIndex(fromNode, edge.fromOutputId);
+      const toPortIndex = this._getInputIndex(toNode, edge.toInputId);
+      const p0 = this._getPortCenter(fromNode, from, false, fromPortIndex);
+      const p3 = this._getPortCenter(toNode, to, true, toPortIndex);
+      const p0x = p0.x;
+      const p0y = p0.y;
+      const p3x = p3.x;
+      const p3y = p3.y;
       const h = Math.max(edgeCfg.handleMin, Math.min(edgeCfg.handleMax, Math.abs(p3x - p0x) * 0.5));
       const c = this._colorForExec(edge.execState, "edge");
       data[o++] = p0x;
@@ -682,7 +835,80 @@ class NodeGraphCanvasElement extends HTMLElement {
     gl.uniform2f(gl.getUniformLocation(this.edgeProgram, "u_viewportPx"), width, height);
     gl.uniform1f(gl.getUniformLocation(this.edgeProgram, "u_glowPx"), edgeCfg.glowPx);
     gl.uniform1f(gl.getUniformLocation(this.edgeProgram, "u_aaPx"), edgeCfg.aaPx);
-    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, edges.length);
+    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, Math.floor(o / 10));
+  }
+
+  _drawPortBatch(textureInfo, instances, width, height, view) {
+    if (!instances.length) return;
+    const gl = this.gl;
+    gl.useProgram(this.spriteProgram);
+    gl.bindVertexArray(this.baseVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.spriteBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, instances, gl.DYNAMIC_DRAW);
+
+    const stride = 8 * 4;
+    gl.enableVertexAttribArray(1);
+    gl.vertexAttribPointer(1, 4, gl.FLOAT, false, stride, 0);
+    gl.vertexAttribDivisor(1, 1);
+    gl.enableVertexAttribArray(2);
+    gl.vertexAttribPointer(2, 4, gl.FLOAT, false, stride, 16);
+    gl.vertexAttribDivisor(2, 1);
+    gl.disableVertexAttribArray(3);
+
+    gl.activeTexture(gl.TEXTURE0);
+    gl.bindTexture(gl.TEXTURE_2D, textureInfo.texture);
+    gl.uniform1i(gl.getUniformLocation(this.spriteProgram, "u_tex"), 0);
+    gl.uniformMatrix3fv(gl.getUniformLocation(this.spriteProgram, "u_view"), false, view);
+    gl.uniform2f(gl.getUniformLocation(this.spriteProgram, "u_viewportPx"), width, height);
+    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, instances.length / 8);
+  }
+
+  _drawPorts(nodes, edges, posById, width, height, view) {
+    if (!this.portTextures) return;
+    const cfg = this.assets.ports;
+    const iconSize = Number(cfg.iconSizePx) || 12;
+    const half = iconSize * 0.5;
+    const uvRect = [0, 0, 1, 1];
+
+    const outputUsage = new Set();
+    for (const edge of edges) {
+      outputUsage.add(`${edge.from}:${edge.fromOutputId}`);
+    }
+
+    const emptyInstances = [];
+    const fullInstances = [];
+    const pushInstance = (target, cx, cy) => {
+      target.push(cx - half, cy - half, iconSize, iconSize);
+      target.push(uvRect[0], uvRect[1], uvRect[2], uvRect[3]);
+    };
+
+    for (const node of nodes) {
+      const pos = posById.get(node.id);
+      if (!pos) continue;
+
+      for (let i = 0; i < node.inputCount; i++) {
+        const input = node.inputs[i];
+        const p = this._getPortCenter(node, pos, true, i);
+        if (input?.srcNodeId) {
+          pushInstance(fullInstances, p.x, p.y);
+        } else {
+          pushInstance(emptyInstances, p.x, p.y);
+        }
+      }
+
+      for (let i = 0; i < node.outputCount; i++) {
+        const output = node.outputs[i];
+        const p = this._getPortCenter(node, pos, false, i);
+        if (output && outputUsage.has(`${node.id}:${output.outputId}`)) {
+          pushInstance(fullInstances, p.x, p.y);
+        } else {
+          pushInstance(emptyInstances, p.x, p.y);
+        }
+      }
+    }
+
+    this._drawPortBatch(this.portTextures.empty, new Float32Array(emptyInstances), width, height, view);
+    this._drawPortBatch(this.portTextures.full, new Float32Array(fullInstances), width, height, view);
   }
 
   _drawNodes(nodes, posById, width, height, view) {
@@ -693,10 +919,11 @@ class NodeGraphCanvasElement extends HTMLElement {
     let o = 0;
     for (const node of nodes) {
       const pos = posById.get(node.id);
+      const nodeSize = this._getNodeSize(node);
       data[o++] = pos.x;
       data[o++] = pos.y;
-      data[o++] = this.assets.node.width;
-      data[o++] = this.assets.node.height;
+      data[o++] = nodeSize.width;
+      data[o++] = nodeSize.height;
     }
 
     gl.useProgram(this.nodeProgram);
@@ -729,6 +956,7 @@ class NodeGraphCanvasElement extends HTMLElement {
     if (!this.textAtlas) return;
     const glyphs = this.textAtlas.glyphs;
     const c = this.assets.theme.text;
+    const cMuted = this.assets.theme.textMuted || c;
 
     gl.useProgram(this.textProgram);
     gl.bindVertexArray(this.baseVao);
@@ -737,7 +965,8 @@ class NodeGraphCanvasElement extends HTMLElement {
     gl.uniform1i(gl.getUniformLocation(this.textProgram, "u_tex"), 0);
     gl.uniformMatrix3fv(gl.getUniformLocation(this.textProgram, "u_view"), false, view);
     gl.uniform2f(gl.getUniformLocation(this.textProgram, "u_viewport"), width, height);
-    gl.uniform4f(gl.getUniformLocation(this.textProgram, "u_color"), c[0], c[1], c[2], c[3]);
+    const colorLoc = gl.getUniformLocation(this.textProgram, "u_color");
+    gl.uniform4f(colorLoc, c[0], c[1], c[2], c[3]);
     const aaBase = Number(this.assets.text.aa || 8);
     const aa = Math.min(32.0, Math.max(6.0, aaBase * this.scale));
     gl.uniform1f(gl.getUniformLocation(this.textProgram, "u_aa"), aa);
@@ -755,41 +984,85 @@ class NodeGraphCanvasElement extends HTMLElement {
     );
     gl.uniform2f(gl.getUniformLocation(this.textProgram, "uAtlasSize"), this.textAtlas.atlasW, this.textAtlas.atlasH);
 
-    const fontScale = this.assets.text.fontPx / Math.max(1, this.textAtlas.atlasSize || 48);
+    const atlasSize = Math.max(1, this.textAtlas.atlasSize || 48);
+    const titlePx = Number(this.assets.text.fontPx || 14);
+    const portPx = Number(this.assets.ports.labelFontPx || 11);
+    const titleScale = titlePx / atlasSize;
+    const portScale = portPx / atlasSize;
 
-    const drawText = (text, startX, baselineY) => {
+    const measureTextWidth = (text, scale) => {
+      let widthPx = 0;
+      for (const ch of text) {
+        const g = glyphs.get(ch.codePointAt(0));
+        if (!g) {
+          widthPx += atlasSize * 0.3 * scale;
+          continue;
+        }
+        widthPx += g.advancePx * scale;
+      }
+      return widthPx;
+    };
+
+    const drawText = (text, startX, baselineY, scale) => {
       let x = startX;
       for (const ch of text) {
         const g = glyphs.get(ch.codePointAt(0));
         if (!g) {
-          x += (this.textAtlas.atlasSize || 48) * 0.3 * fontScale;
+          x += atlasSize * 0.3 * scale;
           continue;
         }
         if (g.empty) {
-          x += g.advancePx * fontScale;
+          x += g.advancePx * scale;
           continue;
         }
-        const gw = g.widthPx * fontScale;
-        const gh = g.heightPx * fontScale;
-        const px = x + g.offsetXPx * fontScale;
-        const py = baselineY + g.baselineOffsetYPx * fontScale;
+        const gw = g.widthPx * scale;
+        const gh = g.heightPx * scale;
+        const px = x + g.offsetXPx * scale;
+        const py = baselineY + g.baselineOffsetYPx * scale;
         gl.uniform2f(gl.getUniformLocation(this.textProgram, "uP"), px, py);
         gl.uniform4f(gl.getUniformLocation(this.textProgram, "uT"), gw * 0.5, 0, 0, gh * 0.5);
         gl.uniform4f(gl.getUniformLocation(this.textProgram, "u_uv"), g.uv[0], g.uv[1], g.uv[2], g.uv[3]);
         gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
-        x += g.advancePx * fontScale;
+        x += g.advancePx * scale;
       }
     };
+
+    const iconHalf = Number(this.assets.ports.iconSizePx || 12) * 0.5;
+    const labelOffset = Number(this.assets.ports.labelOffsetX || 10);
+    const padX = Number(this.assets.layout.nodePaddingX || 10);
 
     for (const node of nodes) {
       const pos = posById.get(node.id);
       const labelA = `${node.kind === NG.NODE_CODE ? "code" : node.kind === NG.NODE_GOAL ? "goal" : "node"} #${node.id}`;
-      const labelB = `state ${node.execState}  agjpqy 0123`;
-      const x = pos.x + 10;
-      const yA = pos.y + this.assets.text.fontPx + 2;
-      const yB = yA + this.assets.text.fontPx * 0.92;
-      drawText(labelA, x, yA);
-      drawText(labelB, x, yB);
+      const labelB = `state ${node.execState}`;
+      const x = pos.x + padX;
+      const yA = pos.y + titlePx + 2;
+      const yB = yA + titlePx * 0.92;
+
+      gl.uniform4f(colorLoc, c[0], c[1], c[2], c[3]);
+      drawText(labelA, x, yA, titleScale);
+      gl.uniform4f(colorLoc, cMuted[0], cMuted[1], cMuted[2], cMuted[3]);
+      drawText(labelB, x, yB, portScale);
+
+      for (let i = 0; i < node.inputCount; i++) {
+        const inputId = node.inputs[i]?.inputId ?? i + 1;
+        const label = this._getPortLabel(node.id, "input", inputId, i);
+        const p = this._getPortCenter(node, pos, true, i);
+        const baselineY = p.y + portPx * 0.35;
+        const startX = p.x + iconHalf + labelOffset;
+        drawText(label, startX, baselineY, portScale);
+      }
+
+      for (let i = 0; i < node.outputCount; i++) {
+        const outputId = node.outputs[i]?.outputId ?? i + 1;
+        const label = this._getPortLabel(node.id, "output", outputId, i);
+        const p = this._getPortCenter(node, pos, false, i);
+        const baselineY = p.y + portPx * 0.35;
+        const labelWidth = measureTextWidth(label, portScale);
+        const endX = p.x - iconHalf - labelOffset;
+        drawText(label, endX - labelWidth, baselineY, portScale);
+      }
+
     }
   }
 }

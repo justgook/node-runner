@@ -46,6 +46,8 @@ web: $(WASM_NAME)
 	cp -f assets/atlas-mtsdf.json $(BUILD_DIR)/web/assets/
 	cp -f assets/atlas-mtsdf.png $(BUILD_DIR)/web/assets/
 	cp -f assets/nine.png $(BUILD_DIR)/web/assets/
+	cp -f assets/port-full.png $(BUILD_DIR)/web/assets/
+	cp -f assets/port-empty.png $(BUILD_DIR)/web/assets/
 
 clean:
 	rm -rf $(BUILD_DIR) $(WASM_NAME)

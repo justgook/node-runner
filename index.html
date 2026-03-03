@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -48,13 +49,11 @@
       inset: 0;
       pointer-events: none;
       opacity: 0.2;
-      background: repeating-linear-gradient(
-        to bottom,
-        rgba(255, 255, 255, 0.04) 0px,
-        rgba(255, 255, 255, 0.04) 1px,
-        transparent 1px,
-        transparent 4px
-      );
+      background: repeating-linear-gradient(to bottom,
+          rgba(255, 255, 255, 0.04) 0px,
+          rgba(255, 255, 255, 0.04) 1px,
+          transparent 1px,
+          transparent 4px);
       z-index: 0;
     }
 
@@ -185,7 +184,7 @@
     .editor-wrap {
       padding: 12px 14px 14px;
       display: grid;
-      grid-template-rows: 230px minmax(180px, 1fr);
+      grid-template-rows: minmax(360px, 1.35fr) minmax(160px, 0.75fr);
       gap: 10px;
       min-height: 0;
       animation: fade-in 420ms ease;
@@ -252,7 +251,7 @@
       overflow: hidden;
     }
 
-    .stack > pre {
+    .stack>pre {
       min-height: 0;
     }
 
@@ -303,6 +302,7 @@
         opacity: 0;
         transform: translateY(6px);
       }
+
       to {
         opacity: 1;
         transform: translateY(0);
@@ -314,6 +314,7 @@
         opacity: 0;
         transform: translateY(-5px);
       }
+
       to {
         opacity: 1;
         transform: translateY(0);
@@ -341,6 +342,7 @@
     }
   </style>
 </head>
+
 <body>
   <div class="scanlines"></div>
   <main class="app">
@@ -369,13 +371,13 @@
         </div>
         <textarea id="source">print("hello from lua")
 
-local total = 0
-for i = 1, 5 do
-  total = total + i
-end
+          local total = 0
+          for i = 1, 5 do
+          total = total + i
+          end
 
-print("sum", total)
-</textarea>
+          print("sum", total)
+        </textarea>
       </div>
     </section>
 
@@ -395,9 +397,9 @@ print("sum", total)
   </main>
 
   <script type="module">
-    import { WASI, File, OpenFile, ConsoleStdout } from "./wasi.js";
+    import {WASI, File, OpenFile, ConsoleStdout} from "./wasi.js";
     import "./node-graph-view.js";
-    import { getNodeGraphRenderAssets } from "./node-graph-assets.js";
+    import {getNodeGraphRenderAssets} from "./node-graph-assets.js";
 
     const SNIPPETS = {
       hello: 'print("hello from node-code")',
@@ -432,8 +434,23 @@ print("sum", total)
     let sourceByNode = new Map([[1, ui.source.value]]);
     const eventLines = [];
     const nodePositions = new Map([
-      [1, { x: 120, y: 78 }],
-      [2, { x: 420, y: 92 }],
+      [1, {x: 96, y: 72}],
+      [2, {x: 440, y: 72}],
+      [3, {x: 96, y: 228}],
+      [4, {x: 440, y: 228}],
+      [5, {x: 96, y: 384}],
+      [6, {x: 440, y: 384}],
+    ]);
+    const portLabels = new Map([
+      [1, {outputs: new Map([[1, "source"], [2, "summary"]])}],
+      [2, {inputs: new Map([[1, "code"], [2, "fallback"]])}],
+      [3, {
+        inputs: new Map([[1, "primary"], [2, "secondary"]]),
+        outputs: new Map([[1, "lua"], [2, "ast"], [3, "meta"]]),
+      }],
+      [4, {inputs: new Map([[1, "ast"]])}],
+      [5, {outputs: new Map([[1, "event"]])}],
+      [6, {inputs: new Map([[1, "left"], [2, "right"]])}],
     ]);
 
     const RUN_EVENT = {
@@ -500,18 +517,51 @@ print("sum", total)
       if (err !== 0) return err;
       err = api.ng_clear_graph();
       if (err !== 0) return err;
-      err = api.ng_node_create(1, 2);
-      if (err !== 0) return err;
-      err = api.ng_output_add(1, 1);
-      if (err !== 0) return err;
-      err = api.ng_node_create(2, 1);
-      if (err !== 0) return err;
-      err = api.ng_input_add(2, 1);
-      if (err !== 0) return err;
-      err = api.ng_input_connect(2, 1, 1, 1);
-      if (err !== 0) return err;
-      err = api.ng_goal_set(2, 1);
-      if (err !== 0) return err;
+
+      const ops = [
+        // Node 1 (code): 2 outputs
+        () => api.ng_node_create(1, 2),
+        () => api.ng_output_add(1, 1),
+        () => api.ng_output_add(1, 2),
+
+        // Node 2 (goal): 2 inputs, only first connected
+        () => api.ng_node_create(2, 1),
+        () => api.ng_input_add(2, 1),
+        () => api.ng_input_add(2, 2),
+        () => api.ng_input_connect(2, 1, 1, 1),
+        () => api.ng_goal_set(2, 1),
+
+        // Node 3 (code): 2 inputs, 3 outputs, one input connected
+        () => api.ng_node_create(3, 2),
+        () => api.ng_input_add(3, 1),
+        () => api.ng_input_add(3, 2),
+        () => api.ng_output_add(3, 1),
+        () => api.ng_output_add(3, 2),
+        () => api.ng_output_add(3, 3),
+        () => api.ng_input_connect(3, 1, 1, 2),
+
+        // Node 4 (goal): one connected input
+        () => api.ng_node_create(4, 1),
+        () => api.ng_input_add(4, 1),
+        () => api.ng_input_connect(4, 1, 3, 2),
+
+        // Node 5 (code): one open output
+        () => api.ng_node_create(5, 2),
+        () => api.ng_output_add(5, 1),
+
+        // Node 6 (goal): two connected inputs
+        () => api.ng_node_create(6, 1),
+        () => api.ng_input_add(6, 1),
+        () => api.ng_input_add(6, 2),
+        () => api.ng_input_connect(6, 1, 3, 1),
+        () => api.ng_input_connect(6, 2, 5, 1),
+      ];
+
+      for (const op of ops) {
+        err = op();
+        if (err !== 0) return err;
+      }
+
       return 0;
     }
 
@@ -520,6 +570,8 @@ print("sum", total)
       api.ng_exec_clear_all();
       try {
         api.ng_run_goal(2);
+        // api.ng_run_all_goals();
+        // api.ng_run_goal(6);
         syncViews();
       } catch (err) {
         ui.output.textContent = "";
@@ -546,13 +598,13 @@ print("sum", total)
     async function boot() {
       const fds = [
         new OpenFile(new File([])),
-        ConsoleStdout.lineBuffered(() => {}),
-        ConsoleStdout.lineBuffered(() => {}),
+        ConsoleStdout.lineBuffered(() => { }),
+        ConsoleStdout.lineBuffered(() => { }),
       ];
       const wasi = new WASI(["node-runner.wasm"], [], fds);
       const response = await fetch("./node-runner.wasm");
       const bytes = await response.arrayBuffer();
-      const { instance } = await WebAssembly.instantiate(bytes, {
+      const {instance} = await WebAssembly.instantiate(bytes, {
         wasi_snapshot_preview1: wasi.wasiImport,
         env: {
           ng_on_node_changed: (nodeId, changeMask) => {
@@ -581,7 +633,8 @@ print("sum", total)
       dv = new DataView(memory.buffer);
       ui.graph.setAssets(getNodeGraphRenderAssets());
       ui.graph.setNodeLayoutMap(nodePositions);
-      ui.graph.attachRuntime({ api, memory });
+      ui.graph.setPortLabelMap(portLabels);
+      ui.graph.attachRuntime({api, memory});
       pushEvent("boot_ok");
       const err = setupGraph();
       if (err !== 0) throw new Error(`setupGraph failed with error ${err}`);
@@ -625,4 +678,5 @@ print("sum", total)
     });
   </script>
 </body>
+
 </html>
