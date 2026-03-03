@@ -648,6 +648,33 @@
       return td.decode(new Uint8Array(memory.buffer, ptr, len));
     }
 
+    function describeRuntimeTrap(prefix, err) {
+      const parts = [];
+      const base = `${prefix}: ${err?.message || String(err)}`;
+      parts.push(base);
+      if (!api || !memory) {
+        return parts.join("\n");
+      }
+      try {
+        const last = typeof api.ng_get_last_error === "function" ? api.ng_get_last_error() : null;
+        const io = typeof api.ng_get_io_len === "function" && typeof api.ng_get_io_ptr === "function"
+          ? readOutputText()
+          : "";
+        if (last !== null && Number.isFinite(last) && last !== 0) {
+          parts.push(`last_error: ${last}`);
+        }
+        if (io) {
+          parts.push(`runtime: ${io}`);
+        }
+        if ((last === null || last === 0) && !io && String(err?.message || "").includes("unreachable")) {
+          parts.push("hint: Lua error trapping is limited in current WASM build; some script errors surface as unreachable traps.");
+        }
+      } catch {
+        // keep base message only
+      }
+      return parts.join("\n");
+    }
+
     function readUtf8(ptr, len) {
       if (!memory || ptr <= 0 || len <= 0) return "";
       return td.decode(new Uint8Array(memory.buffer, ptr, len));
@@ -1054,7 +1081,7 @@
         syncViews();
       } catch (err) {
         ui.output.textContent = "";
-        ui.error.textContent = `wasm trap: ${err.message}`;
+        ui.error.textContent = describeRuntimeTrap("wasm trap", err);
         pushEvent(`wasm_trap ${err.message}`);
       }
     }
@@ -1200,7 +1227,7 @@
         if (err !== 0) ui.error.textContent = `reset failed: ${err}`;
         syncViews();
       } catch (error) {
-        ui.error.textContent = `reset trap: ${error.message}`;
+        ui.error.textContent = describeRuntimeTrap("reset trap", error);
         pushEvent(`reset_trap ${error.message}`);
       }
     });
@@ -1209,7 +1236,7 @@
         api.ng_exec_clear_all();
         syncViews();
       } catch (err) {
-        ui.error.textContent = `clear trap: ${err.message}`;
+        ui.error.textContent = describeRuntimeTrap("clear trap", err);
         pushEvent(`clear_trap ${err.message}`);
       }
     });
