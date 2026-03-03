@@ -232,12 +232,30 @@
     #code-panel {
       min-height: 0;
       display: grid;
-      grid-template-rows: auto 1fr;
+      grid-template-rows: auto auto 1fr;
       gap: 8px;
     }
 
     #code-panel.hidden {
       display: none;
+    }
+
+    .code-tools {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .code-status {
+      margin: 0;
+      font: 600 11px/1 var(--mono);
+      letter-spacing: 0.03em;
+      color: #96bacd;
+    }
+
+    .code-status.dirty {
+      color: #ffcd6f;
     }
 
     textarea:focus-visible {
@@ -471,6 +489,10 @@
         </div>
         <div id="code-panel">
           <p id="code-panel-hint" class="hint">Select a code node to edit Lua source.</p>
+          <div class="code-tools">
+            <button id="save-code" class="btn-snippet">Save Code Slot</button>
+            <p id="code-status" class="code-status">saved</p>
+          </div>
           <textarea id="source">print("hello from lua")
 
           local total = 0
@@ -530,6 +552,8 @@
       editorWrap: document.getElementById("editor-wrap"),
       codePanel: document.getElementById("code-panel"),
       codePanelHint: document.getElementById("code-panel-hint"),
+      saveCode: document.getElementById("save-code"),
+      codeStatus: document.getElementById("code-status"),
       source: document.getElementById("source"),
       run: document.getElementById("run"),
       reset: document.getElementById("reset"),
@@ -548,6 +572,7 @@
     let memory = null;
     let dv = null;
     let sourceByNode = new Map([[1, ui.source.value]]);
+    const draftByNode = new Map([[1, ui.source.value]]);
     let activeCodeNodeId = null;
     const eventLines = [];
     const nodePositions = new Map([
@@ -707,6 +732,36 @@
         .replaceAll("'", "&#39;");
     }
 
+    function setCodeStatus(text, dirty) {
+      ui.codeStatus.textContent = text;
+      ui.codeStatus.classList.toggle("dirty", Boolean(dirty));
+    }
+
+    function loadCodeIntoEditor(nodeId) {
+      const saved = sourceByNode.get(nodeId);
+      const draft = draftByNode.has(nodeId) ? draftByNode.get(nodeId) : saved;
+      const code = draft ?? SNIPPETS.hello;
+      ui.source.value = code;
+      draftByNode.set(nodeId, code);
+      const isDirty = code !== (saved ?? SNIPPETS.hello);
+      setCodeStatus(isDirty ? "unsaved" : "saved", isDirty);
+    }
+
+    function saveActiveCodeSlot(emitEvent = true) {
+      if (activeCodeNodeId === null) return false;
+      const code = ui.source.value;
+      sourceByNode.set(activeCodeNodeId, code);
+      draftByNode.set(activeCodeNodeId, code);
+      setCodeStatus("saved", false);
+      if (emitEvent) pushEvent(`code_saved node=${activeCodeNodeId}`);
+      return true;
+    }
+
+    function getCodeForNode(nodeId) {
+      if (sourceByNode.has(nodeId)) return sourceByNode.get(nodeId) || "";
+      return "";
+    }
+
     function renderNodeEditor() {
       if (!ui.nodeEditor) return;
       const selected = getSelectedNodeSnapshot();
@@ -777,11 +832,13 @@
       ui.snippets.forEach((button) => {
         button.style.display = showCodeTools ? "" : "none";
       });
+      ui.saveCode.disabled = !showCodeTools;
 
       if (!codeNode) {
         activeCodeNodeId = null;
         ui.source.disabled = true;
         ui.codePanelHint.textContent = "Select a code node to edit Lua source.";
+        setCodeStatus("n/a", false);
         return;
       }
 
@@ -789,7 +846,7 @@
       if (activeCodeNodeId !== nodeId) {
         activeCodeNodeId = nodeId;
         if (!sourceByNode.has(nodeId)) sourceByNode.set(nodeId, SNIPPETS.hello);
-        ui.source.value = sourceByNode.get(nodeId) || "";
+        loadCodeIntoEditor(nodeId);
       }
 
       ui.source.disabled = false;
@@ -929,9 +986,7 @@
     }
 
     function runSource() {
-      if (activeCodeNodeId !== null) {
-        sourceByNode.set(activeCodeNodeId, ui.source.value);
-      }
+      if (activeCodeNodeId !== null) saveActiveCodeSlot(false);
       api.ng_exec_clear_all();
       try {
         api.ng_run_all_goals();
@@ -983,7 +1038,8 @@
           ng_host_resolve: (nodeId, resolveKind, reqPtr, reqLen, outPtr, outCap, outLenPtr) => {
             if (!memory) return 7;
             if (resolveKind !== 1) return 7;
-            const src = sourceByNode.get(nodeId) || "";
+            if (!sourceByNode.has(nodeId)) return 3;
+            const src = getCodeForNode(nodeId);
             const bytes = new TextEncoder().encode(src);
             if (bytes.length > outCap) return 4;
             new Uint8Array(memory.buffer, outPtr, bytes.length).set(bytes);
@@ -1040,12 +1096,19 @@
         const key = button.getAttribute("data-snippet");
         if (!key || !SNIPPETS[key] || activeCodeNodeId === null) return;
         ui.source.value = SNIPPETS[key];
-        sourceByNode.set(activeCodeNodeId, ui.source.value);
+        draftByNode.set(activeCodeNodeId, ui.source.value);
+        const saved = sourceByNode.get(activeCodeNodeId);
+        setCodeStatus(ui.source.value === (saved ?? SNIPPETS.hello) ? "saved" : "unsaved", ui.source.value !== (saved ?? SNIPPETS.hello));
       });
     });
     ui.source.addEventListener("input", () => {
       if (activeCodeNodeId === null) return;
-      sourceByNode.set(activeCodeNodeId, ui.source.value);
+      draftByNode.set(activeCodeNodeId, ui.source.value);
+      const saved = sourceByNode.get(activeCodeNodeId);
+      setCodeStatus(ui.source.value === (saved ?? SNIPPETS.hello) ? "saved" : "unsaved", ui.source.value !== (saved ?? SNIPPETS.hello));
+    });
+    ui.saveCode.addEventListener("click", () => {
+      saveActiveCodeSlot();
     });
     window.addEventListener("resize", () => ui.graph.requestRenderIfGenerationChanged(true));
 
