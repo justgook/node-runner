@@ -481,6 +481,7 @@
         <button class="btn-snippet" data-snippet="hello">Snippet: Hello</button>
         <button class="btn-snippet" data-snippet="sum">Snippet: Sum</button>
         <button class="btn-snippet" data-snippet="err">Snippet: Error</button>
+        <button class="btn-snippet" data-snippet="http">Snippet: HTTP JSON</button>
       </div>
 
       <div id="editor-wrap" class="editor-wrap">
@@ -493,14 +494,9 @@
             <button id="save-code" class="btn-snippet">Save Code Slot</button>
             <p id="code-status" class="code-status">saved</p>
           </div>
-          <textarea id="source">print("hello from lua")
-
-          local total = 0
-          for i = 1, 5 do
-          total = total + i
-          end
-
-          print("sum", total)
+          <textarea id="source">local req = '{"url":"/assets/example.json","method":"GET"}'
+            local raw = host.awaitCall("http", "get", req)
+            print("http raw", raw)
           </textarea>
         </div>
       </div>
@@ -532,6 +528,7 @@
       hello: 'print("hello from node-code")',
       sum: 'local n = 0\nfor i = 1, 8 do\n  n = n + i\nend\nprint("sum", n)',
       err: "error('boom from node-code')",
+      http: "local req = '{\"url\":\"/assets/example.json\",\"method\":\"GET\"}'\nlocal raw = host.awaitCall(\"http\", \"get\", req)\nprint(\"http raw\", raw)",
     };
 
     const INFO = {
@@ -546,6 +543,7 @@
       NODE_CODE: 2,
       NODE_VALUE: 4,
       ERR_OK: 0,
+      RUN_WAITING: 2,
     };
 
     const ui = {
@@ -573,6 +571,11 @@
     let dv = null;
     let sourceByNode = new Map([[1, ui.source.value]]);
     const draftByNode = new Map([[1, ui.source.value]]);
+    const valueByNode = new Map([
+      [7, "https://example.com/a"],
+      [8, "https://example.com/b"],
+      [9, "https://example.com/c"],
+    ]);
     let activeCodeNodeId = null;
     const eventLines = [];
     const nodePositions = new Map([
@@ -623,6 +626,7 @@
     }
 
     const td = new TextDecoder();
+    const te = new TextEncoder();
 
     function infoPtr() {
       return api.ng_get_info_ptr();
@@ -642,6 +646,53 @@
       const len = api.ng_get_io_len();
       const ptr = api.ng_get_io_ptr();
       return td.decode(new Uint8Array(memory.buffer, ptr, len));
+    }
+
+    function readUtf8(ptr, len) {
+      if (!memory || ptr <= 0 || len <= 0) return "";
+      return td.decode(new Uint8Array(memory.buffer, ptr, len));
+    }
+
+    function writeResponseAndContinue(requestId, jsonText) {
+      if (!api || typeof api.ng_run_response !== "function") return;
+      const payload = String(jsonText ?? "{}");
+      const bytes = te.encode(payload);
+      const ptr = api.ng_get_io_ptr();
+      const cap = 65535;
+      const len = Math.min(bytes.length, cap);
+      new Uint8Array(memory.buffer, ptr, len).set(bytes.subarray(0, len));
+      api.ng_run_response(requestId, ptr, len);
+      syncViews();
+    }
+
+    async function handleHostAwaitRequest(nodeId, requestId, service, method, payloadJson) {
+      pushEvent(`await_request node=${nodeId} req=${requestId} ${service}.${method}`);
+      if (service === "http") {
+        try {
+          const parsed = payloadJson ? JSON.parse(payloadJson) : {};
+          const url = String(parsed.url || "");
+          const reqInit = {
+            method: String(parsed.method || method || "GET").toUpperCase(),
+            headers: parsed.headers && typeof parsed.headers === "object" ? parsed.headers : undefined,
+            body: typeof parsed.body === "string" ? parsed.body : undefined,
+          };
+          const resp = await fetch(url, reqInit);
+          const body = await resp.text();
+          const result = JSON.stringify({
+            ok: resp.ok,
+            status: resp.status,
+            statusText: resp.statusText,
+            body,
+          });
+          writeResponseAndContinue(requestId, result);
+          return;
+        } catch (error) {
+          const result = JSON.stringify({ok: false, error: String(error?.message || error)});
+          writeResponseAndContinue(requestId, result);
+          return;
+        }
+      }
+      writeResponseAndContinue(requestId, JSON.stringify({ok: false, error: `unsupported service: ${service}`}));
     }
 
     function syncViews() {
@@ -673,7 +724,7 @@
       const nodeId = Number(selected[0]);
       const node = graph.nodes.find((item) => item.id === nodeId);
       if (!node) return null;
-      return { node, graph };
+      return {node, graph};
     }
 
     function nodeKindName(kind) {
@@ -693,7 +744,7 @@
 
     function ensureNodePortLabels(nodeId) {
       if (!portLabels.has(nodeId)) {
-        portLabels.set(nodeId, { inputs: new Map(), outputs: new Map() });
+        portLabels.set(nodeId, {inputs: new Map(), outputs: new Map()});
       }
       const entry = portLabels.get(nodeId);
       if (!(entry.inputs instanceof Map)) entry.inputs = new Map(entry.inputs || []);
@@ -771,7 +822,7 @@
         return;
       }
 
-      const { node } = selected;
+      const {node} = selected;
       const kind = nodeKindName(node.kind);
       const canEditIn = nodeSupportsInputCrud(node);
       const canEditOut = nodeSupportsOutputCrud(node);
@@ -989,7 +1040,15 @@
       if (activeCodeNodeId !== null) saveActiveCodeSlot(false);
       api.ng_exec_clear_all();
       try {
-        api.ng_run_all_goals();
+        let err = 0;
+        if (typeof api.ng_run_start === "function") {
+          err = api.ng_run_start(0);
+        } else {
+          err = api.ng_run_all_goals();
+        }
+        if (err !== 0) {
+          ui.error.textContent = `run failed: ${err}`;
+        }
         // api.ng_run_goal(2);
         // api.ng_run_goal(6);
         syncViews();
@@ -1037,13 +1096,77 @@
           },
           ng_host_resolve: (nodeId, resolveKind, reqPtr, reqLen, outPtr, outCap, outLenPtr) => {
             if (!memory) return 7;
-            if (resolveKind !== 1) return 7;
-            if (!sourceByNode.has(nodeId)) return 3;
-            const src = getCodeForNode(nodeId);
-            const bytes = new TextEncoder().encode(src);
+            let payload = "";
+            if (resolveKind === 1) {
+              if (!sourceByNode.has(nodeId)) return 3;
+              payload = getCodeForNode(nodeId);
+            } else if (resolveKind === 2) {
+              const req = readUtf8(reqPtr, reqLen);
+              const p0 = req.indexOf("|");
+              const p1 = p0 >= 0 ? req.indexOf("|", p0 + 1) : -1;
+              const service = p0 >= 0 ? req.slice(0, p0) : "";
+              const method = p1 >= 0 ? req.slice(p0 + 1, p1) : "";
+              const raw = p1 >= 0 ? req.slice(p1 + 1) : "{}";
+              if (service === "http") {
+                let url = "";
+                let reqMethod = String(method || "GET").toUpperCase();
+                let reqHeaders = null;
+                let reqBody = null;
+                try {
+                  const parsed = raw ? JSON.parse(raw) : {};
+                  url = String(parsed.url || "");
+                  reqMethod = String(parsed.method || reqMethod || "GET").toUpperCase();
+                  reqHeaders = parsed.headers && typeof parsed.headers === "object" ? parsed.headers : null;
+                  reqBody = typeof parsed.body === "string" ? parsed.body : null;
+                } catch {
+                  url = "";
+                }
+                try {
+                  const xhr = new XMLHttpRequest();
+                  xhr.open(reqMethod || "GET", url, false);
+                  if (reqHeaders) {
+                    for (const [key, value] of Object.entries(reqHeaders)) {
+                      if (value === undefined || value === null) continue;
+                      xhr.setRequestHeader(String(key), String(value));
+                    }
+                  }
+                  xhr.send(reqBody);
+                  payload = JSON.stringify({
+                    ok: xhr.status >= 200 && xhr.status < 300,
+                    method: reqMethod,
+                    url,
+                    status: xhr.status,
+                    statusText: xhr.statusText,
+                    body: xhr.responseText,
+                  });
+                } catch (error) {
+                  payload = JSON.stringify({
+                    ok: false,
+                    method: reqMethod,
+                    url,
+                    error: String(error?.message || error),
+                  });
+                }
+              } else {
+                payload = JSON.stringify({ok: false, error: `unsupported service: ${service}`});
+              }
+            } else if (resolveKind === 3) {
+              payload = valueByNode.get(nodeId) || "";
+            } else {
+              return 7;
+            }
+            const bytes = new TextEncoder().encode(payload);
             if (bytes.length > outCap) return 4;
             new Uint8Array(memory.buffer, outPtr, bytes.length).set(bytes);
             new DataView(memory.buffer).setInt32(outLenPtr, bytes.length, true);
+            return 0;
+          },
+          ng_host_request: (nodeId, requestId, servicePtr, serviceLen, methodPtr, methodLen, payloadPtr, payloadLen) => {
+            if (!memory) return 7;
+            const service = readUtf8(servicePtr, serviceLen);
+            const method = readUtf8(methodPtr, methodLen);
+            const payloadJson = readUtf8(payloadPtr, payloadLen);
+            handleHostAwaitRequest(nodeId, requestId, service, method, payloadJson);
             return 0;
           },
         },

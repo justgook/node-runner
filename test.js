@@ -31,7 +31,7 @@ async function run() {
   }
 
   let memory = null;
-  const sourceMap = new Map([[1, 'print("hello from node-code")']]);
+  const sourceMap = new Map([[1, 'local resp = host.awaitCall("mock", "get", "seed")\nprint(resp)']]);
 
   const wasi = new WASI({
     version: "preview1",
@@ -44,18 +44,27 @@ async function run() {
   const { instance } = await WebAssembly.instantiate(wasmBytes, {
     wasi_snapshot_preview1: wasi.wasiImport,
     env: {
-      ng_on_node_changed: () => {},
-      ng_on_run_event: () => {},
+      ng_on_node_changed: () => { },
+      ng_on_run_event: () => { },
       ng_host_resolve: (nodeId, resolveKind, reqPtr, reqLen, outPtr, outCap, outLenPtr) => {
         if (!memory) return 7;
-        if (resolveKind !== 1) return 7;
-        const src = sourceMap.get(nodeId) || "";
-        const bytes = Buffer.from(src, "utf8");
+        let payload = "";
+        if (resolveKind === 1) {
+          payload = sourceMap.get(nodeId) || "";
+        } else if (resolveKind === 2) {
+          payload = "mock-await-response";
+        } else if (resolveKind === 3) {
+          payload = `value-node-${nodeId}`;
+        } else {
+          return 7;
+        }
+        const bytes = Buffer.from(payload, "utf8");
         if (bytes.length > outCap) return 4;
         new Uint8Array(memory.buffer, outPtr, bytes.length).set(bytes);
         new DataView(memory.buffer).setInt32(outLenPtr, bytes.length, true);
         return 0;
       },
+      ng_host_request: () => 0,
     },
   });
   wasi.start(instance);
@@ -89,8 +98,9 @@ async function run() {
   assertEq(api.ng_input_add(3, 1), ERR.OK, "add goal 3 input");
   assertEq(api.ng_input_connect(3, 1, 1, 1), ERR.OK, "connect goal 3 <- code");
 
-  assertEq(api.ng_run_all_goals(), ERR.OK, "all goals should run without activation");
-  assertIncludes(readOutputFromInfo(), "hello from node-code", "output should contain Lua print");
+  assertEq(api.ng_run_start(0), ERR.OK, "run should finish through awaitCall mock");
+
+  assertIncludes(readOutputFromInfo(), "mock-await-response", "output should contain awaited mock response");
 
   assertEq(api.ng_get_node_exec_state(1), NG.EXEC_SUCCESS, "node-code should be success");
   assertEq(api.ng_get_node_exec_state(2), NG.EXEC_SUCCESS, "node-goal 2 should be success");

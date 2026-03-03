@@ -83,6 +83,15 @@ enum ng_run_event_kind {
   NG_RUN_EVENT_RUN_FINISHED = 5,
 };
 
+enum ng_run_status {
+  NG_RUN_IDLE = 0,
+  NG_RUN_RUNNING = 1,
+  NG_RUN_WAITING = 2,
+  NG_RUN_DONE = 3,
+  NG_RUN_ERROR = 4,
+  NG_RUN_CANCELLED = 5,
+};
+
 /* ---- Value slot ------------------------------------------------------- */
 
 enum ng_value_type {
@@ -156,6 +165,10 @@ typedef struct {
 
   char io_buf[NG_IO_BUFFER_CAP];
 
+  ng_u32 run_status;         /* enum ng_run_status */
+  ng_u32 waiting_request_id; /* 0 when not waiting */
+  ng_u32 waiting_node_id;    /* 0 when not waiting */
+
 } NgInfo;
 
 /* ---- API -------------------------------------------------------------- */
@@ -214,6 +227,17 @@ ng_i32 ng_run_all_goals(void);
 NG_EXPORT("ng_run_goal")
 ng_i32 ng_run_goal(ng_u32 goal_node_id);
 
+/* async-capable run API: goal_node_id=0 means run all goals */
+NG_EXPORT("ng_run_start")
+ng_i32 ng_run_start(ng_u32 goal_node_id);
+
+/* provide JSON response for the currently pending host.awaitCall request */
+NG_EXPORT("ng_run_response")
+ng_i32 ng_run_response(ng_u32 request_id, ng_i32 json_ptr, ng_i32 json_len);
+
+NG_EXPORT("ng_run_cancel")
+ng_i32 ng_run_cancel(void);
+
 /* clear execution state for a node and (optionally) downstream nodes */
 NG_EXPORT("ng_exec_clear")
 ng_i32 ng_exec_clear(ng_u32 node_id, ng_i32 recursive_downstream);
@@ -246,6 +270,12 @@ void ng_on_run_event(ng_u32 node_id, ng_u32 event_kind, ng_i32 error_code);
 ng_i32 ng_host_resolve(ng_u32 node_id, ng_u32 resolve_kind, const char *req_ptr,
                        ng_i32 req_len, char *out_ptr, ng_i32 out_cap,
                        ng_i32 *out_len);
+
+/* async host call request from Lua host.awaitCall(service, method, payload_json) */
+ng_i32 ng_host_request(ng_u32 node_id, ng_u32 request_id, const char *service_ptr,
+                       ng_i32 service_len, const char *method_ptr,
+                       ng_i32 method_len, const char *payload_ptr,
+                       ng_i32 payload_len);
 
 #undef NG_EXPORT
 
