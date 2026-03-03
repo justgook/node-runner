@@ -51,9 +51,9 @@ Status key: [x] done, [~] partial, [ ] todo
      - [x] Port hit-test with configurable hit radius
      - [x] Edge hit-test (curve distance threshold)
    - 4.2 Selection behavior
-     - [ ] Single select, Ctrl/Cmd multiselect, clear-on-empty
+     - [x] Single select, Ctrl/Cmd multiselect, clear-on-empty
    - 4.3 Node drag
-     - [ ] Drag selected node(s), commit positions to wasm
+     - [~] Drag selected node(s), commit positions to wasm
      - [ ] Optional front-priority/z-index update
    - 4.4 Connection editing
      - [ ] Drag from port to create edge

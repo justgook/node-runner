@@ -133,6 +133,9 @@ class NodeGraphCanvasElement extends HTMLElement {
     this.dragStartX = 0;
     this.dragStartY = 0;
     this.isPanning = false;
+    this.isNodeDragging = false;
+    this.nodeDragStartWorld = { x: 0, y: 0 };
+    this.nodeDragItems = [];
 
     this.textAtlas = null;
     this.skinTexture = null;
@@ -141,6 +144,7 @@ class NodeGraphCanvasElement extends HTMLElement {
     this.lastGraph = null;
     this.lastPosById = new Map();
     this.hoverPick = null;
+    this.selectedNodeIds = new Set();
 
     this._onWheel = this._onWheel.bind(this);
     this._onPointerDown = this._onPointerDown.bind(this);
@@ -245,27 +249,75 @@ class NodeGraphCanvasElement extends HTMLElement {
   _onPointerDown(e) {
     if (!this.gl) return;
 
+    const world = this._worldFromClientPoint(e.clientX, e.clientY);
     const pick = this._pickFromClientPoint(e.clientX, e.clientY);
     this.hoverPick = pick;
+    const multi = e.ctrlKey || e.metaKey;
 
-    const shouldPan = !pick;
-    if (shouldPan) {
+    if (!pick) {
+      if (!multi) this.selectedNodeIds.clear();
       this.isDragging = true;
       this.isPanning = true;
+      this.isNodeDragging = false;
       this.dragStartX = e.clientX - this.offsetX;
       this.dragStartY = e.clientY - this.offsetY;
       this.canvas.setPointerCapture(e.pointerId);
       this.canvas.style.cursor = "grabbing";
-    } else {
-      this.isDragging = false;
-      this.isPanning = false;
-      this.canvas.style.cursor = "crosshair";
+      this.requestRenderIfGenerationChanged(true);
+      return;
     }
+
+    if (pick.kind === "node") {
+      const id = pick.nodeId;
+      if (multi) {
+        if (this.selectedNodeIds.has(id)) this.selectedNodeIds.delete(id);
+        else this.selectedNodeIds.add(id);
+      } else {
+        this.selectedNodeIds.clear();
+        this.selectedNodeIds.add(id);
+      }
+
+      const dragTargets = this.selectedNodeIds.has(id) ? Array.from(this.selectedNodeIds) : [id];
+      this.isDragging = true;
+      this.isPanning = false;
+      this.isNodeDragging = true;
+      this.nodeDragStartWorld = world;
+      this.nodeDragItems = dragTargets
+        .map((nodeId) => {
+          const pos = this.nodeLayout.get(nodeId);
+          if (!pos) return null;
+          return { nodeId, startX: pos.x, startY: pos.y };
+        })
+        .filter(Boolean);
+      this.canvas.setPointerCapture(e.pointerId);
+      this.canvas.style.cursor = "grabbing";
+      this.requestRenderIfGenerationChanged(true);
+      return;
+    }
+
+    this.isDragging = false;
+    this.isPanning = false;
+    this.isNodeDragging = false;
+    this.canvas.style.cursor = "crosshair";
 
     this.requestRenderIfGenerationChanged(true);
   }
 
   _onPointerMove(e) {
+    if (this.isDragging && this.isNodeDragging) {
+      const world = this._worldFromClientPoint(e.clientX, e.clientY);
+      const dx = world.x - this.nodeDragStartWorld.x;
+      const dy = world.y - this.nodeDragStartWorld.y;
+      for (const item of this.nodeDragItems) {
+        const pos = this.nodeLayout.get(item.nodeId);
+        if (!pos) continue;
+        pos.x = Math.round(item.startX + dx);
+        pos.y = Math.round(item.startY + dy);
+      }
+      this.requestRenderIfGenerationChanged(true);
+      return;
+    }
+
     if (this.isDragging && this.isPanning) {
       this.offsetX = e.clientX - this.dragStartX;
       this.offsetY = e.clientY - this.dragStartY;
@@ -283,6 +335,8 @@ class NodeGraphCanvasElement extends HTMLElement {
     if (this.isDragging) {
       this.isDragging = false;
       this.isPanning = false;
+      this.isNodeDragging = false;
+      this.nodeDragItems = [];
       if (this.canvas.hasPointerCapture(e.pointerId)) {
         this.canvas.releasePointerCapture(e.pointerId);
       }
@@ -295,6 +349,19 @@ class NodeGraphCanvasElement extends HTMLElement {
     }
   }
 
+  _canvasPxFromClientPoint(clientX, clientY) {
+    const rect = this.canvas.getBoundingClientRect();
+    return {
+      x: (clientX - rect.left) * (this.canvas.width / Math.max(1, rect.width)),
+      y: (clientY - rect.top) * (this.canvas.height / Math.max(1, rect.height)),
+    };
+  }
+
+  _worldFromClientPoint(clientX, clientY) {
+    const px = this._canvasPxFromClientPoint(clientX, clientY);
+    return this._screenToWorld(px.x, px.y);
+  }
+
   _screenToWorld(screenX, screenY) {
     return {
       x: (screenX - this.offsetX) / this.scale,
@@ -304,9 +371,9 @@ class NodeGraphCanvasElement extends HTMLElement {
 
   _pickFromClientPoint(clientX, clientY) {
     if (!this.lastGraph || !this.lastPosById?.size) return null;
-    const rect = this.canvas.getBoundingClientRect();
-    const x = (clientX - rect.left) * (this.canvas.width / Math.max(1, rect.width));
-    const y = (clientY - rect.top) * (this.canvas.height / Math.max(1, rect.height));
+    const px = this._canvasPxFromClientPoint(clientX, clientY);
+    const x = px.x;
+    const y = px.y;
     const world = this._screenToWorld(x, y);
 
     const portHit = this._hitTestPort(world.x, world.y, this.lastGraph.nodes, this.lastPosById);
@@ -770,6 +837,7 @@ class NodeGraphCanvasElement extends HTMLElement {
     const view = this._viewMatrix();
     this._drawEdges(graph.nodes, graph.edges, posById, width, height, view);
     this._drawNodes(graph.nodes, posById, width, height, view);
+    this._drawSelectionOverlay(graph.nodes, posById, width, height, view);
     this._drawPorts(graph.nodes, graph.edges, posById, width, height, view);
     this._drawLabels(graph.nodes, posById, width, height, view);
     this._drawPickOverlay(this.hoverPick, graph.nodes, graph.edges, posById, width, height, view);
@@ -1085,7 +1153,127 @@ class NodeGraphCanvasElement extends HTMLElement {
       gl.uniform1f(gl.getUniformLocation(this.edgeProgram, "u_glowPx"), Math.max(edgeCfg.glowPx, 4));
       gl.uniform1f(gl.getUniformLocation(this.edgeProgram, "u_aaPx"), edgeCfg.aaPx);
       gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, 1);
+      return;
     }
+
+    if (pick.kind === "node") {
+      const node = nodes.find((n) => n.id === pick.nodeId);
+      const pos = node ? posById.get(node.id) : null;
+      if (!node || !pos) return;
+      const size = this._getNodeSize(node);
+      const active = this.assets.theme.edgeActive || [133 / 255, 192 / 255, 255 / 255, 1];
+      this._drawRectOutline([
+        {
+          x: pos.x - 2,
+          y: pos.y - 2,
+          width: size.width + 4,
+          height: size.height + 4,
+          color: [active[0], active[1], active[2], 0.85],
+          strokePx: 2,
+        },
+      ], width, height, view);
+    }
+  }
+
+  _drawSelectionOverlay(nodes, posById, width, height, view) {
+    if (!this.selectedNodeIds?.size) return;
+    const selection = this.assets.theme.selection || [74 / 255, 199 / 255, 255 / 255, 1];
+    const rects = [];
+    for (const node of nodes) {
+      if (!this.selectedNodeIds.has(node.id)) continue;
+      const pos = posById.get(node.id);
+      if (!pos) continue;
+      const size = this._getNodeSize(node);
+      rects.push({
+        x: pos.x - 3,
+        y: pos.y - 3,
+        width: size.width + 6,
+        height: size.height + 6,
+        color: [selection[0], selection[1], selection[2], 0.95],
+        strokePx: 2,
+      });
+    }
+    this._drawRectOutline(rects, width, height, view);
+  }
+
+  _drawRectOutline(rects, width, height, view) {
+    if (!rects.length) return;
+    const gl = this.gl;
+    if (!this.rectProgram) {
+      this.rectProgram = createProgram(
+        gl,
+        `#version 300 es
+        precision highp float;
+        layout(location=0) in vec2 a_uv;
+        layout(location=1) in vec4 a_rect;
+        layout(location=2) in vec4 a_color;
+        layout(location=3) in float a_stroke;
+        uniform mat3 u_view;
+        uniform vec2 u_viewportPx;
+        out vec2 v_local;
+        out vec2 v_size;
+        out vec4 v_color;
+        out float v_stroke;
+        void main() {
+          vec2 world = a_rect.xy + a_uv * a_rect.zw;
+          vec2 screen = (u_view * vec3(world, 1.0)).xy;
+          v_local = a_uv * a_rect.zw;
+          v_size = a_rect.zw;
+          v_color = a_color;
+          v_stroke = a_stroke;
+          vec2 ndc = (screen / u_viewportPx) * 2.0 - 1.0;
+          ndc.y = -ndc.y;
+          gl_Position = vec4(ndc, 0.0, 1.0);
+        }`,
+        `#version 300 es
+        precision highp float;
+        in vec2 v_local;
+        in vec2 v_size;
+        in vec4 v_color;
+        in float v_stroke;
+        out vec4 outColor;
+        void main() {
+          float edgeDist = min(min(v_local.x, v_local.y), min(v_size.x - v_local.x, v_size.y - v_local.y));
+          float aa = max(1.0, fwidth(edgeDist));
+          float a = 1.0 - smoothstep(v_stroke - aa, v_stroke + aa, edgeDist);
+          if (a < 0.001) discard;
+          outColor = vec4(v_color.rgb, v_color.a * a);
+        }`
+      );
+      this.rectBuffer = gl.createBuffer();
+    }
+
+    const data = new Float32Array(rects.length * 9);
+    let o = 0;
+    for (const r of rects) {
+      data[o++] = r.x;
+      data[o++] = r.y;
+      data[o++] = r.width;
+      data[o++] = r.height;
+      data[o++] = r.color[0];
+      data[o++] = r.color[1];
+      data[o++] = r.color[2];
+      data[o++] = r.color[3];
+      data[o++] = r.strokePx;
+    }
+
+    gl.useProgram(this.rectProgram);
+    gl.bindVertexArray(this.baseVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.rectBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, data, gl.DYNAMIC_DRAW);
+    const stride = 9 * 4;
+    gl.enableVertexAttribArray(1);
+    gl.vertexAttribPointer(1, 4, gl.FLOAT, false, stride, 0);
+    gl.vertexAttribDivisor(1, 1);
+    gl.enableVertexAttribArray(2);
+    gl.vertexAttribPointer(2, 4, gl.FLOAT, false, stride, 16);
+    gl.vertexAttribDivisor(2, 1);
+    gl.enableVertexAttribArray(3);
+    gl.vertexAttribPointer(3, 1, gl.FLOAT, false, stride, 32);
+    gl.vertexAttribDivisor(3, 1);
+    gl.uniformMatrix3fv(gl.getUniformLocation(this.rectProgram, "u_view"), false, view);
+    gl.uniform2f(gl.getUniformLocation(this.rectProgram, "u_viewportPx"), width, height);
+    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, rects.length);
   }
 
   _drawPortBatch(textureInfo, instances, width, height, view) {
