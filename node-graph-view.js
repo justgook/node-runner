@@ -5,6 +5,7 @@ const NG = {
   MAX_ARGS: 32,
   NODE_GOAL: 1,
   NODE_CODE: 2,
+  NODE_VALUE: 4,
 };
 
 const ABI = {
@@ -202,6 +203,16 @@ class NodeGraphCanvasElement extends HTMLElement {
     this.requestRenderIfGenerationChanged(true);
   }
 
+  getGraphSnapshot() {
+    if (!this.api || !this.memory) return { nodes: [], edges: [] };
+    if (!this._ensureDataView()) return { nodes: [], edges: [] };
+    return this._readGraph();
+  }
+
+  getSelectedNodeIds() {
+    return Array.from(this.selectedNodeIds || []);
+  }
+
   attachRuntime({ api, memory }) {
     this.api = api;
     this.memory = memory;
@@ -287,7 +298,9 @@ class NodeGraphCanvasElement extends HTMLElement {
     }
 
     if (!pick) {
+      const hadSelection = this.selectedNodeIds.size > 0;
       if (!multi) this.selectedNodeIds.clear();
+      if (hadSelection && !this.selectedNodeIds.size) this._emitSelectionChanged();
       this.isDragging = true;
       this.isPanning = true;
       this.isNodeDragging = false;
@@ -301,6 +314,7 @@ class NodeGraphCanvasElement extends HTMLElement {
 
     if (pick.kind === "node") {
       const id = pick.nodeId;
+      const before = this.getSelectedNodeIds().join(",");
       if (multi) {
         if (this.selectedNodeIds.has(id)) this.selectedNodeIds.delete(id);
         else this.selectedNodeIds.add(id);
@@ -311,6 +325,8 @@ class NodeGraphCanvasElement extends HTMLElement {
           this.selectedNodeIds.add(id);
         }
       }
+      const after = this.getSelectedNodeIds().join(",");
+      if (before !== after) this._emitSelectionChanged();
 
       const dragTargets = this.selectedNodeIds.has(id) ? Array.from(this.selectedNodeIds) : [id];
       this.isDragging = true;
@@ -1785,7 +1801,14 @@ class NodeGraphCanvasElement extends HTMLElement {
     for (const node of nodes) {
       const pos = posById.get(node.id);
       const nodeSize = this._getNodeSize(node);
-      const labelA = `${node.kind === NG.NODE_CODE ? "code" : node.kind === NG.NODE_GOAL ? "goal" : "node"} #${node.id}`;
+      const kindLabel = node.kind === NG.NODE_CODE
+        ? "code"
+        : node.kind === NG.NODE_GOAL
+          ? "goal"
+          : node.kind === NG.NODE_VALUE
+            ? "value"
+            : "node";
+      const labelA = `${kindLabel} #${node.id}`;
       const labelState = `state ${node.execState}`;
       const x = pos.x + padX;
       const yA = pos.y + titlePx + 2;
@@ -1818,6 +1841,14 @@ class NodeGraphCanvasElement extends HTMLElement {
       }
 
     }
+  }
+
+  _emitSelectionChanged() {
+    this.dispatchEvent(new CustomEvent("ng-selection-change", {
+      bubbles: true,
+      composed: true,
+      detail: { selectedNodeIds: this.getSelectedNodeIds() },
+    }));
   }
 }
 

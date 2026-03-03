@@ -190,6 +190,10 @@
       animation: fade-in 420ms ease;
     }
 
+    .editor-wrap.code-hidden {
+      grid-template-rows: minmax(360px, 1fr);
+    }
+
     .graph-wrap {
       min-height: 0;
       border: 1px solid #34566a;
@@ -225,6 +229,17 @@
       box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.02);
     }
 
+    #code-panel {
+      min-height: 0;
+      display: grid;
+      grid-template-rows: auto 1fr;
+      gap: 8px;
+    }
+
+    #code-panel.hidden {
+      display: none;
+    }
+
     textarea:focus-visible {
       outline: none;
       border-color: #57bfd0;
@@ -243,16 +258,105 @@
     }
 
     .stack {
-      display: grid;
+      display: flex;
+      flex-direction: column;
       gap: 10px;
       height: 100%;
       min-height: 0;
-      grid-template-rows: auto minmax(90px, 0.7fr) auto minmax(120px, 0.9fr) auto minmax(90px, 0.7fr) auto minmax(120px, 0.9fr);
-      overflow: hidden;
+      overflow: auto;
+      padding-right: 4px;
     }
 
     .stack>pre {
-      min-height: 0;
+      min-height: 88px;
+      max-height: 220px;
+    }
+
+    .node-editor {
+      border: 1px solid #34566a;
+      border-radius: 11px;
+      background: #0b1922;
+      padding: 10px;
+      display: grid;
+      gap: 8px;
+      font: 500 12px/1.4 var(--mono);
+      color: #d3ebf8;
+    }
+
+    .node-editor .line {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .node-editor .label {
+      color: #92b8cc;
+      min-width: 90px;
+    }
+
+    .node-editor input {
+      min-width: 0;
+      width: 88px;
+      border: 1px solid #35596e;
+      border-radius: 8px;
+      background: #0f2230;
+      color: #e0f5ff;
+      font: 600 12px/1.2 var(--mono);
+      padding: 5px 7px;
+    }
+
+    .node-editor input[type="text"] {
+      width: 150px;
+      font-family: var(--sans);
+      font-weight: 500;
+    }
+
+    .node-editor button {
+      min-height: 28px;
+      padding: 5px 9px;
+      font-size: 12px;
+      border-radius: 8px;
+      background: linear-gradient(180deg, #294556, #1c303d);
+      border-color: #355c72;
+      color: #c9dfec;
+    }
+
+    .node-editor button.warn {
+      background: linear-gradient(180deg, #8e3f44, #5d292d);
+      border-color: #a55158;
+      color: #ffdfe2;
+    }
+
+    .port-list {
+      margin: 0;
+      padding-left: 18px;
+      display: grid;
+      gap: 4px;
+    }
+
+    .port-item {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .port-item .name {
+      color: #8dd8c8;
+      font-family: var(--sans);
+      font-size: 12px;
+    }
+
+    .port-item .id {
+      color: #90b3c6;
+    }
+
+    .hint {
+      margin: 0;
+      color: #82a7ba;
+      font-size: 11px;
+      line-height: 1.35;
     }
 
     .k {
@@ -332,10 +436,6 @@
         min-height: auto;
       }
 
-      .stack {
-        grid-template-rows: auto minmax(95px, auto) auto minmax(120px, auto) auto minmax(95px, auto) auto minmax(120px, auto);
-      }
-
       textarea {
         min-height: 240px;
       }
@@ -365,11 +465,13 @@
         <button class="btn-snippet" data-snippet="err">Snippet: Error</button>
       </div>
 
-      <div class="editor-wrap">
+      <div id="editor-wrap" class="editor-wrap">
         <div class="graph-wrap">
           <node-graph-canvas id="graph-view"></node-graph-canvas>
         </div>
-        <textarea id="source">print("hello from lua")
+        <div id="code-panel">
+          <p id="code-panel-hint" class="hint">Select a code node to edit Lua source.</p>
+          <textarea id="source">print("hello from lua")
 
           local total = 0
           for i = 1, 5 do
@@ -377,13 +479,16 @@
           end
 
           print("sum", total)
-        </textarea>
+          </textarea>
+        </div>
       </div>
     </section>
 
     <aside class="card side">
       <p class="legend">Run valid Lua snippets for stable behavior in this minimal target.</p>
       <div class="stack">
+        <h2 class="k">Node Ports</h2>
+        <div id="node-editor" class="node-editor">waiting for runtime...</div>
         <h2 class="k">Status</h2>
         <pre id="meta">booting...</pre>
         <h2 class="k">Output</h2>
@@ -414,13 +519,24 @@
       ACTIVE_GOAL_COUNT: 20,
     };
 
+    const NG = {
+      NODE_GOAL: 1,
+      NODE_CODE: 2,
+      NODE_VALUE: 4,
+      ERR_OK: 0,
+    };
+
     const ui = {
+      editorWrap: document.getElementById("editor-wrap"),
+      codePanel: document.getElementById("code-panel"),
+      codePanelHint: document.getElementById("code-panel-hint"),
       source: document.getElementById("source"),
       run: document.getElementById("run"),
       reset: document.getElementById("reset"),
       clear: document.getElementById("clear"),
       clearEvents: document.getElementById("clear-events"),
       graph: document.getElementById("graph-view"),
+      nodeEditor: document.getElementById("node-editor"),
       meta: document.getElementById("meta"),
       output: document.getElementById("output"),
       error: document.getElementById("error"),
@@ -432,6 +548,7 @@
     let memory = null;
     let dv = null;
     let sourceByNode = new Map([[1, ui.source.value]]);
+    let activeCodeNodeId = null;
     const eventLines = [];
     const nodePositions = new Map([
       [1, {x: 96, y: 72}],
@@ -519,7 +636,227 @@
         `active_goal_count: ${readU32(INFO.ACTIVE_GOAL_COUNT)}`,
         `io_len: ${api.ng_get_io_len()} bytes`,
       ].join("\n");
+      renderNodeEditor();
       ui.graph.requestRenderIfGenerationChanged();
+    }
+
+    function getSelectedNodeSnapshot() {
+      const selected = ui.graph.getSelectedNodeIds ? ui.graph.getSelectedNodeIds() : [];
+      if (!selected.length) return null;
+      const graph = ui.graph.getGraphSnapshot ? ui.graph.getGraphSnapshot() : null;
+      if (!graph?.nodes?.length) return null;
+      const nodeId = Number(selected[0]);
+      const node = graph.nodes.find((item) => item.id === nodeId);
+      if (!node) return null;
+      return { node, graph };
+    }
+
+    function nodeKindName(kind) {
+      if (kind === NG.NODE_GOAL) return "goal";
+      if (kind === NG.NODE_CODE) return "code";
+      if (kind === NG.NODE_VALUE) return "value";
+      return `kind-${kind}`;
+    }
+
+    function nodeSupportsInputCrud(node) {
+      return node.kind === NG.NODE_GOAL || node.kind === NG.NODE_CODE;
+    }
+
+    function nodeSupportsOutputCrud(node) {
+      return node.kind === NG.NODE_VALUE || node.kind === NG.NODE_CODE;
+    }
+
+    function ensureNodePortLabels(nodeId) {
+      if (!portLabels.has(nodeId)) {
+        portLabels.set(nodeId, { inputs: new Map(), outputs: new Map() });
+      }
+      const entry = portLabels.get(nodeId);
+      if (!(entry.inputs instanceof Map)) entry.inputs = new Map(entry.inputs || []);
+      if (!(entry.outputs instanceof Map)) entry.outputs = new Map(entry.outputs || []);
+      return entry;
+    }
+
+    function nextPortId(ports, key) {
+      let max = 0;
+      for (const item of ports) {
+        const value = Number(item[key]) || 0;
+        if (value > max) max = value;
+      }
+      return max + 1;
+    }
+
+    function removePortLabel(nodeId, direction, portId) {
+      const entry = ensureNodePortLabels(nodeId);
+      const dict = direction === "input" ? entry.inputs : entry.outputs;
+      dict.delete(portId);
+    }
+
+    function setPortLabel(nodeId, direction, portId, label) {
+      const clean = String(label || "").trim();
+      const entry = ensureNodePortLabels(nodeId);
+      const dict = direction === "input" ? entry.inputs : entry.outputs;
+      dict.set(portId, clean || `${direction === "input" ? "in" : "out"} ${portId}`);
+    }
+
+    function escapeHtml(text) {
+      return String(text)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#39;");
+    }
+
+    function renderNodeEditor() {
+      if (!ui.nodeEditor) return;
+      const selected = getSelectedNodeSnapshot();
+      syncCodeEditorFromSelection(selected);
+      if (!selected) {
+        ui.nodeEditor.innerHTML = `<p class="hint">Select a node to edit ports. Start with goal/value nodes.</p>`;
+        return;
+      }
+
+      const { node } = selected;
+      const kind = nodeKindName(node.kind);
+      const canEditIn = nodeSupportsInputCrud(node);
+      const canEditOut = nodeSupportsOutputCrud(node);
+      const labelCfg = ensureNodePortLabels(node.id);
+      const nextInputId = nextPortId(node.inputs, "inputId");
+      const nextOutputId = nextPortId(node.outputs, "outputId");
+
+      const inputRows = node.inputs
+        .map((port) => {
+          const portId = Number(port.inputId);
+          const label = escapeHtml(labelCfg.inputs.get(portId) || `in ${portId}`);
+          return `<li class="port-item"><span class="id">#${portId}</span><span class="name">${label}</span><button data-action="remove-input" data-node-id="${node.id}" data-port-id="${portId}" ${!canEditIn ? "disabled" : ""}>remove</button></li>`;
+        })
+        .join("");
+
+      const outputRows = node.outputs
+        .map((port) => {
+          const portId = Number(port.outputId);
+          const label = escapeHtml(labelCfg.outputs.get(portId) || `out ${portId}`);
+          return `<li class="port-item"><span class="id">#${portId}</span><span class="name">${label}</span><button data-action="remove-output" data-node-id="${node.id}" data-port-id="${portId}" ${!canEditOut ? "disabled" : ""}>remove</button></li>`;
+        })
+        .join("");
+
+      const inputsSection = canEditIn ? `
+        <div class="line">
+          <span class="label">Add input</span>
+          <input type="number" min="1" step="1" id="add-input-id" value="${nextInputId}">
+          <input type="text" id="add-input-name" placeholder="name" value="in ${nextInputId}">
+          <button data-action="add-input" data-node-id="${node.id}">add</button>
+        </div>
+        <ul class="port-list">${inputRows || "<li class='hint'>no inputs</li>"}</ul>
+      ` : "";
+
+      const outputsSection = canEditOut ? `
+        <div class="line">
+          <span class="label">Add output</span>
+          <input type="number" min="1" step="1" id="add-output-id" value="${nextOutputId}">
+          <input type="text" id="add-output-name" placeholder="name" value="out ${nextOutputId}">
+          <button data-action="add-output" data-node-id="${node.id}">add</button>
+        </div>
+        <ul class="port-list">${outputRows || "<li class='hint'>no outputs</li>"}</ul>
+      ` : "";
+
+      ui.nodeEditor.innerHTML = `
+        <div class="line"><span class="label">Selected</span><strong>${kind} #${node.id}</strong></div>
+        <p class="hint">Allowed by kind: ${canEditIn ? "inputs" : "no inputs"}, ${canEditOut ? "outputs" : "no outputs"}.</p>
+        ${inputsSection}
+        ${outputsSection}
+      `;
+    }
+
+    function syncCodeEditorFromSelection(selected) {
+      const codeNode = selected?.node?.kind === NG.NODE_CODE ? selected.node : null;
+      const showCodeTools = Boolean(codeNode);
+
+      ui.codePanel.classList.toggle("hidden", !showCodeTools);
+      ui.editorWrap.classList.toggle("code-hidden", !showCodeTools);
+      ui.snippets.forEach((button) => {
+        button.style.display = showCodeTools ? "" : "none";
+      });
+
+      if (!codeNode) {
+        activeCodeNodeId = null;
+        ui.source.disabled = true;
+        ui.codePanelHint.textContent = "Select a code node to edit Lua source.";
+        return;
+      }
+
+      const nodeId = codeNode.id;
+      if (activeCodeNodeId !== nodeId) {
+        activeCodeNodeId = nodeId;
+        if (!sourceByNode.has(nodeId)) sourceByNode.set(nodeId, SNIPPETS.hello);
+        ui.source.value = sourceByNode.get(nodeId) || "";
+      }
+
+      ui.source.disabled = false;
+      ui.codePanelHint.textContent = `Editing code for node #${nodeId}`;
+    }
+
+    function applyPortCrudAction(button) {
+      if (!button || !api) return;
+      const action = button.getAttribute("data-action");
+      const nodeId = Number(button.getAttribute("data-node-id"));
+      const portId = Number(button.getAttribute("data-port-id"));
+      let err = NG.ERR_OK;
+      const selected = getSelectedNodeSnapshot();
+      if (!selected || selected.node.id !== nodeId) {
+        ui.error.textContent = "select target node first";
+        return;
+      }
+      const node = selected.node;
+
+      if (action === "add-input") {
+        if (!nodeSupportsInputCrud(node)) {
+          ui.error.textContent = "inputs are not editable for this node kind";
+          return;
+        }
+        const idInput = ui.nodeEditor.querySelector("#add-input-id");
+        const nameInput = ui.nodeEditor.querySelector("#add-input-name");
+        const inputId = Number(idInput?.value);
+        if (!Number.isInteger(inputId) || inputId <= 0) {
+          ui.error.textContent = "invalid input id";
+          return;
+        }
+        err = api.ng_input_add(nodeId, inputId);
+        if (err === NG.ERR_OK) setPortLabel(nodeId, "input", inputId, nameInput?.value || "");
+      } else if (action === "remove-input") {
+        if (!nodeSupportsInputCrud(node)) {
+          ui.error.textContent = "inputs are not editable for this node kind";
+          return;
+        }
+        err = api.ng_input_remove(nodeId, portId);
+        if (err === NG.ERR_OK) removePortLabel(nodeId, "input", portId);
+      } else if (action === "add-output") {
+        if (!nodeSupportsOutputCrud(node)) {
+          ui.error.textContent = "outputs are not editable for this node kind";
+          return;
+        }
+        const idInput = ui.nodeEditor.querySelector("#add-output-id");
+        const nameInput = ui.nodeEditor.querySelector("#add-output-name");
+        const outputId = Number(idInput?.value);
+        if (!Number.isInteger(outputId) || outputId <= 0) {
+          ui.error.textContent = "invalid output id";
+          return;
+        }
+        err = api.ng_output_add(nodeId, outputId);
+        if (err === NG.ERR_OK) setPortLabel(nodeId, "output", outputId, nameInput?.value || "");
+      } else if (action === "remove-output") {
+        if (!nodeSupportsOutputCrud(node)) {
+          ui.error.textContent = "outputs are not editable for this node kind";
+          return;
+        }
+        err = api.ng_output_remove(nodeId, portId);
+        if (err === NG.ERR_OK) removePortLabel(nodeId, "output", portId);
+      }
+
+      if (err !== NG.ERR_OK) {
+        ui.error.textContent = `port operation failed: err=${err}`;
+      }
+      syncViews();
     }
 
     function setupGraph() {
@@ -565,12 +902,12 @@
         () => api.ng_input_connect(6, 1, 3, 1),
         () => api.ng_input_connect(6, 2, 5, 1),
 
-        // Nodes 7-9 (value-like code nodes): single open output each
-        () => api.ng_node_create(7, 2),
+        // Nodes 7-9 (value nodes): single open output each
+        () => api.ng_node_create(7, 4),
         () => api.ng_output_add(7, 1),
-        () => api.ng_node_create(8, 2),
+        () => api.ng_node_create(8, 4),
         () => api.ng_output_add(8, 1),
-        () => api.ng_node_create(9, 2),
+        () => api.ng_node_create(9, 4),
         () => api.ng_output_add(9, 1),
 
         // Node 10 (goal): consumes values from 7/8/9
@@ -592,7 +929,9 @@
     }
 
     function runSource() {
-      sourceByNode.set(1, ui.source.value);
+      if (activeCodeNodeId !== null) {
+        sourceByNode.set(activeCodeNodeId, ui.source.value);
+      }
       api.ng_exec_clear_all();
       try {
         api.ng_run_all_goals();
@@ -613,6 +952,7 @@
           const g = readU32(INFO.GENERATION);
           if (g !== last) {
             last = g;
+            renderNodeEditor();
             ui.graph.requestRenderIfGenerationChanged();
           }
         }
@@ -661,6 +1001,12 @@
       ui.graph.setNodeLayoutMap(nodePositions);
       ui.graph.setPortLabelMap(portLabels);
       ui.graph.attachRuntime({api, memory});
+      ui.graph.addEventListener("ng-selection-change", () => renderNodeEditor());
+      ui.nodeEditor.addEventListener("click", (event) => {
+        const button = event.target.closest("button[data-action]");
+        if (!button) return;
+        applyPortCrudAction(button);
+      });
       pushEvent("boot_ok");
       const err = setupGraph();
       if (err !== 0) throw new Error(`setupGraph failed with error ${err}`);
@@ -692,8 +1038,14 @@
     ui.snippets.forEach((button) => {
       button.addEventListener("click", () => {
         const key = button.getAttribute("data-snippet");
-        if (key && SNIPPETS[key]) ui.source.value = SNIPPETS[key];
+        if (!key || !SNIPPETS[key] || activeCodeNodeId === null) return;
+        ui.source.value = SNIPPETS[key];
+        sourceByNode.set(activeCodeNodeId, ui.source.value);
       });
+    });
+    ui.source.addEventListener("input", () => {
+      if (activeCodeNodeId === null) return;
+      sourceByNode.set(activeCodeNodeId, ui.source.value);
     });
     window.addEventListener("resize", () => ui.graph.requestRenderIfGenerationChanged(true));
 
