@@ -168,11 +168,10 @@ class NodeGraphCanvasElement extends HTMLElement {
   setAssets(assets) {
     this.assets = assets;
     if (this.gl) {
-      this._buildNineSliceTexture();
-      this._loadTextAtlasFromAssets()
+      Promise.all([this._loadNineSliceTextureFromAssets(), this._loadTextAtlasFromAssets()])
         .then(() => this.requestRenderIfGenerationChanged(true))
         .catch((err) => {
-          console.error("text atlas load failed", err);
+          console.error("graph asset load failed", err);
         });
     }
   }
@@ -375,21 +374,15 @@ class NodeGraphCanvasElement extends HTMLElement {
       precision highp float;
       layout(location=0) in vec2 a_uv;
       layout(location=1) in vec4 a_rect;
-      layout(location=2) in vec4 a_fill;
-      layout(location=3) in vec4 a_border;
       uniform mat3 u_view;
       uniform vec2 u_viewportPx;
       out vec2 v_local;
       out vec2 v_size;
-      out vec4 v_fill;
-      out vec4 v_border;
       void main() {
         vec2 world = a_rect.xy + a_uv * a_rect.zw;
         vec2 screen = (u_view * vec3(world, 1.0)).xy;
         v_local = a_uv * a_rect.zw;
         v_size = a_rect.zw;
-        v_fill = a_fill;
-        v_border = a_border;
         vec2 ndc = (screen / u_viewportPx) * 2.0 - 1.0;
         ndc.y = -ndc.y;
         gl_Position = vec4(ndc, 0.0, 1.0);
@@ -398,8 +391,6 @@ class NodeGraphCanvasElement extends HTMLElement {
       precision highp float;
       in vec2 v_local;
       in vec2 v_size;
-      in vec4 v_fill;
-      in vec4 v_border;
       uniform sampler2D u_skin;
       uniform vec2 u_skinSize;
       uniform vec4 u_slice;
@@ -423,14 +414,8 @@ class NodeGraphCanvasElement extends HTMLElement {
         float u = mapAxis(v_local.x, v_size.x, u_slice.x, u_slice.y, u_skinSize.x);
         float v = mapAxis(v_local.y, v_size.y, u_slice.z, u_slice.w, u_skinSize.y);
         vec4 skin = texture(u_skin, vec2(u, v));
-        float borderMask = skin.r;
-        float fillMask = skin.g;
-        vec4 col = vec4(0.0);
-        col += v_fill * fillMask;
-        col += v_border * borderMask;
-        col.a = max(col.a, max(fillMask * v_fill.a, borderMask * v_border.a));
-        if (col.a < 0.001) discard;
-        outColor = col;
+        if (skin.a < 0.001) discard;
+        outColor = skin;
       }`
     );
 
@@ -506,56 +491,23 @@ class NodeGraphCanvasElement extends HTMLElement {
     this.edgeBuffer = gl.createBuffer();
     this.nodeBuffer = gl.createBuffer();
     this.textAtlas = null;
-    this._buildNineSliceTexture();
   }
 
-  _buildNineSliceTexture() {
+  async _loadNineSliceTextureFromAssets() {
     if (!this.gl || !this.assets) return;
     const gl = this.gl;
     const cfg = this.assets.nineSlice;
-    const size = cfg.size || 64;
-    const borderPx = cfg.borderPx || 2;
-
-    const c = document.createElement("canvas");
-    c.width = size;
-    c.height = size;
-    const cx = c.getContext("2d");
-    cx.clearRect(0, 0, size, size);
-
-    const img = cx.createImageData(size, size);
-    const data = img.data;
-    const r = size * 0.2;
-    const innerR = Math.max(1, r - borderPx);
-    const cx0 = size * 0.5;
-    const cy0 = size * 0.5;
-    const half = size * 0.5;
-
-    function sdRoundRect(px, py, hw, hh, rr) {
-      const dx = Math.abs(px) - (hw - rr);
-      const dy = Math.abs(py) - (hh - rr);
-      const qx = Math.max(dx, 0);
-      const qy = Math.max(dy, 0);
-      return Math.hypot(qx, qy) + Math.min(Math.max(dx, dy), 0) - rr;
+    const textureUrl = cfg?.textureUrl;
+    if (!textureUrl) {
+      throw new Error("missing nineSlice.textureUrl");
     }
 
-    for (let y = 0; y < size; y++) {
-      for (let x = 0; x < size; x++) {
-        const px = x + 0.5 - cx0;
-        const py = y + 0.5 - cy0;
-        const dOuter = sdRoundRect(px, py, half - 1, half - 1, r);
-        const dInner = sdRoundRect(px, py, half - 1 - borderPx, half - 1 - borderPx, innerR);
-        const outer = dOuter <= 0 ? 1 : 0;
-        const inner = dInner <= 0 ? 1 : 0;
-        const border = Math.max(0, outer - inner);
-        const fill = inner;
-        const i = (y * size + x) * 4;
-        data[i + 0] = Math.round(border * 255);
-        data[i + 1] = Math.round(fill * 255);
-        data[i + 2] = 0;
-        data[i + 3] = Math.round(Math.max(border, fill) * 255);
-      }
+    const textureRes = await fetch(textureUrl, { cache: "no-cache" });
+    if (!textureRes.ok) {
+      throw new Error(`failed to fetch ${textureUrl}: ${textureRes.status}`);
     }
-    cx.putImageData(img, 0, 0);
+    const textureBlob = await textureRes.blob();
+    const textureImage = await createImageBitmap(textureBlob);
 
     const tex = gl.createTexture();
     gl.bindTexture(gl.TEXTURE_2D, tex);
@@ -563,8 +515,11 @@ class NodeGraphCanvasElement extends HTMLElement {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, c);
-    this.skinTexture = { texture: tex, size };
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, textureImage);
+    if (this.skinTexture?.texture) {
+      gl.deleteTexture(this.skinTexture.texture);
+    }
+    this.skinTexture = { texture: tex, width: textureImage.width, height: textureImage.height };
   }
 
   async _loadTextAtlasFromAssets() {
@@ -734,47 +689,31 @@ class NodeGraphCanvasElement extends HTMLElement {
     const gl = this.gl;
     if (!nodes.length || !this.skinTexture) return;
 
-    const data = new Float32Array(nodes.length * 12);
+    const data = new Float32Array(nodes.length * 4);
     let o = 0;
     for (const node of nodes) {
       const pos = posById.get(node.id);
-      const fill = this.assets.theme.nodeFill;
-      const border = this._colorForExec(node.execState, "nodeBorder");
       data[o++] = pos.x;
       data[o++] = pos.y;
       data[o++] = this.assets.node.width;
       data[o++] = this.assets.node.height;
-      data[o++] = fill[0];
-      data[o++] = fill[1];
-      data[o++] = fill[2];
-      data[o++] = fill[3];
-      data[o++] = border[0];
-      data[o++] = border[1];
-      data[o++] = border[2];
-      data[o++] = border[3];
     }
 
     gl.useProgram(this.nodeProgram);
     gl.bindVertexArray(this.baseVao);
     gl.bindBuffer(gl.ARRAY_BUFFER, this.nodeBuffer);
     gl.bufferData(gl.ARRAY_BUFFER, data, gl.DYNAMIC_DRAW);
-    const stride = 12 * 4;
+    const stride = 4 * 4;
     gl.enableVertexAttribArray(1);
     gl.vertexAttribPointer(1, 4, gl.FLOAT, false, stride, 0);
     gl.vertexAttribDivisor(1, 1);
-    gl.enableVertexAttribArray(2);
-    gl.vertexAttribPointer(2, 4, gl.FLOAT, false, stride, 16);
-    gl.vertexAttribDivisor(2, 1);
-    gl.enableVertexAttribArray(3);
-    gl.vertexAttribPointer(3, 4, gl.FLOAT, false, stride, 32);
-    gl.vertexAttribDivisor(3, 1);
 
     gl.activeTexture(gl.TEXTURE0);
     gl.bindTexture(gl.TEXTURE_2D, this.skinTexture.texture);
     gl.uniform1i(gl.getUniformLocation(this.nodeProgram, "u_skin"), 0);
     gl.uniformMatrix3fv(gl.getUniformLocation(this.nodeProgram, "u_view"), false, view);
     gl.uniform2f(gl.getUniformLocation(this.nodeProgram, "u_viewportPx"), width, height);
-    gl.uniform2f(gl.getUniformLocation(this.nodeProgram, "u_skinSize"), this.skinTexture.size, this.skinTexture.size);
+    gl.uniform2f(gl.getUniformLocation(this.nodeProgram, "u_skinSize"), this.skinTexture.width, this.skinTexture.height);
     gl.uniform4f(
       gl.getUniformLocation(this.nodeProgram, "u_slice"),
       this.assets.nineSlice.left,

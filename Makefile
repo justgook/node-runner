@@ -45,6 +45,7 @@ web: $(WASM_NAME)
 	cp -f node-graph-view.js $(BUILD_DIR)/web/
 	cp -f assets/atlas-mtsdf.json $(BUILD_DIR)/web/assets/
 	cp -f assets/atlas-mtsdf.png $(BUILD_DIR)/web/assets/
+	cp -f assets/nine.png $(BUILD_DIR)/web/assets/
 
 clean:
 	rm -rf $(BUILD_DIR) $(WASM_NAME)

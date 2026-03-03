@@ -44,13 +44,13 @@ export function getNodeGraphRenderAssets() {
     },
     nineSlice: {
       enabled: true,
-      textureUrl: null,
-      size: 64,
-      left: 12,
-      right: 12,
-      top: 12,
-      bottom: 12,
-      borderPx: 2,
+      textureUrl: "./assets/nine.png",
+      size: 48,
+      left: 8,
+      right: 8,
+      top: 8,
+      bottom: 8,
+      borderPx: 8,
     },
   };
 }
