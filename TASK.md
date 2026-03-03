@@ -53,12 +53,12 @@ Status key: [x] done, [~] partial, [ ] todo
    - 4.2 Selection behavior
      - [x] Single select, Ctrl/Cmd multiselect, clear-on-empty
    - 4.3 Node drag
-     - [~] Drag selected node(s), commit positions to wasm
+     - [x] Drag selected node(s), commit positions to frontend layout map
      - [ ] Optional front-priority/z-index update
    - 4.4 Connection editing
-     - [ ] Drag from port to create edge
-     - [ ] Reconnect by dragging existing edge endpoint
-     - [ ] Drop on empty to disconnect (for reconnect flow)
+     - [x] Drag from port to create edge
+     - [x] Reconnect by dragging existing edge endpoint
+     - [x] Drop on empty to disconnect (for reconnect flow)
    - 4.5 Camera controls
      - [~] Pan, zoom-at-cursor, fit-to-content
 

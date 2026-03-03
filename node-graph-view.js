@@ -145,6 +145,7 @@ class NodeGraphCanvasElement extends HTMLElement {
     this.lastPosById = new Map();
     this.hoverPick = null;
     this.selectedNodeIds = new Set();
+    this.connectionDrag = null;
 
     this._onWheel = this._onWheel.bind(this);
     this._onPointerDown = this._onPointerDown.bind(this);
@@ -254,6 +255,28 @@ class NodeGraphCanvasElement extends HTMLElement {
     this.hoverPick = pick;
     const multi = e.ctrlKey || e.metaKey;
 
+    if (pick?.kind === "port") {
+      this._beginConnectionFromPort(pick);
+      if (!this.connectionDrag) return;
+      this.connectionDrag.moving = world;
+      this._updateConnectionHoverTarget(world.x, world.y);
+      this.canvas.setPointerCapture(e.pointerId);
+      this.canvas.style.cursor = "crosshair";
+      this.requestRenderIfGenerationChanged(true);
+      return;
+    }
+
+    if (pick?.kind === "edge") {
+      this._beginReconnectFromEdge(pick);
+      if (!this.connectionDrag) return;
+      this.connectionDrag.moving = world;
+      this._updateConnectionHoverTarget(world.x, world.y);
+      this.canvas.setPointerCapture(e.pointerId);
+      this.canvas.style.cursor = "crosshair";
+      this.requestRenderIfGenerationChanged(true);
+      return;
+    }
+
     if (!pick) {
       if (!multi) this.selectedNodeIds.clear();
       this.isDragging = true;
@@ -273,8 +296,11 @@ class NodeGraphCanvasElement extends HTMLElement {
         if (this.selectedNodeIds.has(id)) this.selectedNodeIds.delete(id);
         else this.selectedNodeIds.add(id);
       } else {
-        this.selectedNodeIds.clear();
-        this.selectedNodeIds.add(id);
+        const keepGroupSelection = this.selectedNodeIds.size > 1 && this.selectedNodeIds.has(id);
+        if (!keepGroupSelection) {
+          this.selectedNodeIds.clear();
+          this.selectedNodeIds.add(id);
+        }
       }
 
       const dragTargets = this.selectedNodeIds.has(id) ? Array.from(this.selectedNodeIds) : [id];
@@ -304,6 +330,15 @@ class NodeGraphCanvasElement extends HTMLElement {
   }
 
   _onPointerMove(e) {
+    if (this.connectionDrag) {
+      const world = this._worldFromClientPoint(e.clientX, e.clientY);
+      this.connectionDrag.moving = world;
+      this._updateConnectionHoverTarget(world.x, world.y);
+      this.canvas.style.cursor = "crosshair";
+      this.requestRenderIfGenerationChanged(true);
+      return;
+    }
+
     if (this.isDragging && this.isNodeDragging) {
       const world = this._worldFromClientPoint(e.clientX, e.clientY);
       const dx = world.x - this.nodeDragStartWorld.x;
@@ -332,6 +367,16 @@ class NodeGraphCanvasElement extends HTMLElement {
   }
 
   _onPointerUp(e) {
+    if (this.connectionDrag) {
+      this._finishConnectionDrag();
+      if (this.canvas.hasPointerCapture(e.pointerId)) {
+        this.canvas.releasePointerCapture(e.pointerId);
+      }
+      this.canvas.style.cursor = "default";
+      this.requestRenderIfGenerationChanged(true);
+      return;
+    }
+
     if (this.isDragging) {
       this.isDragging = false;
       this.isPanning = false;
@@ -347,6 +392,193 @@ class NodeGraphCanvasElement extends HTMLElement {
       this.canvas.style.cursor = pick ? "crosshair" : "default";
       this.requestRenderIfGenerationChanged(true);
     }
+  }
+
+  _beginConnectionFromPort(portPick) {
+    const nodesById = new Map((this.lastGraph?.nodes || []).map((node) => [node.id, node]));
+    const node = nodesById.get(portPick.nodeId);
+    const pos = this.lastPosById.get(portPick.nodeId);
+    if (!node || !pos) return;
+
+    const p = this._getPortCenter(node, pos, portPick.direction === "input", portPick.index);
+    this.connectionDrag = {
+      mode: portPick.direction === "output" ? "from-output" : "from-input",
+      fixed: {
+        nodeId: portPick.nodeId,
+        direction: portPick.direction,
+        index: portPick.index,
+        portId: portPick.portId,
+        x: p.x,
+        y: p.y,
+      },
+      moving: { x: p.x, y: p.y },
+      hoverTarget: null,
+      validTarget: null,
+      originalEdge: null,
+    };
+
+    if (portPick.direction === "input" && portPick.connected) {
+      const existingEdge = (this.lastGraph?.edges || []).find(
+        (edge) => edge.to === portPick.nodeId && edge.toInputId === portPick.portId
+      );
+      if (existingEdge) {
+        this.connectionDrag.mode = "reconnect-input";
+        this.connectionDrag.originalEdge = existingEdge;
+        this.connectionDrag.fixed = {
+          nodeId: existingEdge.from,
+          direction: "output",
+          index: this._getOutputIndex(nodesById.get(existingEdge.from), existingEdge.fromOutputId),
+          portId: existingEdge.fromOutputId,
+          x: this._getPortCenter(
+            nodesById.get(existingEdge.from),
+            this.lastPosById.get(existingEdge.from),
+            false,
+            this._getOutputIndex(nodesById.get(existingEdge.from), existingEdge.fromOutputId)
+          ).x,
+          y: this._getPortCenter(
+            nodesById.get(existingEdge.from),
+            this.lastPosById.get(existingEdge.from),
+            false,
+            this._getOutputIndex(nodesById.get(existingEdge.from), existingEdge.fromOutputId)
+          ).y,
+        };
+      }
+    }
+  }
+
+  _beginReconnectFromEdge(edgePick) {
+    const edge = edgePick.edge;
+    if (!edge) return;
+    const nodesById = new Map((this.lastGraph?.nodes || []).map((node) => [node.id, node]));
+    const fromNode = nodesById.get(edge.from);
+    const toNode = nodesById.get(edge.to);
+    const fromPos = this.lastPosById.get(edge.from);
+    const toPos = this.lastPosById.get(edge.to);
+    if (!fromNode || !toNode || !fromPos || !toPos) return;
+
+    const fromIndex = this._getOutputIndex(fromNode, edge.fromOutputId);
+    const toIndex = this._getInputIndex(toNode, edge.toInputId);
+    const fromPort = this._getPortCenter(fromNode, fromPos, false, fromIndex);
+    const toPort = this._getPortCenter(toNode, toPos, true, toIndex);
+
+    if (edgePick.side === "output") {
+      this.connectionDrag = {
+        mode: "reconnect-output",
+        fixed: {
+          nodeId: edge.to,
+          direction: "input",
+          index: toIndex,
+          portId: edge.toInputId,
+          x: toPort.x,
+          y: toPort.y,
+        },
+        moving: { x: fromPort.x, y: fromPort.y },
+        hoverTarget: null,
+        validTarget: null,
+        originalEdge: edge,
+      };
+      return;
+    }
+
+    this.connectionDrag = {
+      mode: "reconnect-input",
+      fixed: {
+        nodeId: edge.from,
+        direction: "output",
+        index: fromIndex,
+        portId: edge.fromOutputId,
+        x: fromPort.x,
+        y: fromPort.y,
+      },
+      moving: { x: toPort.x, y: toPort.y },
+      hoverTarget: null,
+      validTarget: null,
+      originalEdge: edge,
+    };
+  }
+
+  _updateConnectionHoverTarget(worldX, worldY) {
+    if (!this.connectionDrag || !this.lastGraph) return;
+    const hit = this._hitTestPort(worldX, worldY, this.lastGraph.nodes, this.lastPosById);
+    if (!hit) {
+      this.connectionDrag.hoverTarget = null;
+      this.connectionDrag.validTarget = null;
+      this.hoverPick = null;
+      return;
+    }
+    this.connectionDrag.hoverTarget = hit;
+    this.connectionDrag.validTarget = this._validateConnectionTarget(this.connectionDrag, hit) ? hit : null;
+    this.hoverPick = { kind: "port", ...hit };
+  }
+
+  _validateConnectionTarget(drag, target) {
+    if (!drag || !target) return false;
+    if (target.direction === drag.fixed.direction) return false;
+    if (target.nodeId === drag.fixed.nodeId) return false;
+    return true;
+  }
+
+  _applyInputDisconnect(nodeId, inputId) {
+    if (!this.api?.ng_input_disconnect) return;
+    const err = this.api.ng_input_disconnect(nodeId, inputId);
+    if (err !== 0) {
+      console.warn(`ng_input_disconnect failed node=${nodeId} input=${inputId} err=${err}`);
+    }
+  }
+
+  _applyInputConnect(toNodeId, toInputId, fromNodeId, fromOutputId) {
+    if (!this.api?.ng_input_connect) return;
+    const err = this.api.ng_input_connect(toNodeId, toInputId, fromNodeId, fromOutputId);
+    if (err !== 0) {
+      console.warn(
+        `ng_input_connect failed to=${toNodeId}.${toInputId} from=${fromNodeId}.${fromOutputId} err=${err}`
+      );
+    }
+  }
+
+  _finishConnectionDrag() {
+    const drag = this.connectionDrag;
+    if (!drag) return;
+    const target = drag.validTarget;
+    const orig = drag.originalEdge;
+    const isReconnect = drag.mode === "reconnect-input" || drag.mode === "reconnect-output";
+
+    if (target) {
+      const from = drag.fixed.direction === "output"
+        ? drag.fixed
+        : {
+          nodeId: target.nodeId,
+          portId: target.portId,
+          direction: target.direction,
+        };
+      const to = drag.fixed.direction === "input"
+        ? drag.fixed
+        : {
+          nodeId: target.nodeId,
+          portId: target.portId,
+          direction: target.direction,
+        };
+
+      const sameAsOriginal = Boolean(
+        orig &&
+        from.nodeId === orig.from &&
+        from.portId === orig.fromOutputId &&
+        to.nodeId === orig.to &&
+        to.portId === orig.toInputId
+      );
+
+      if (isReconnect && orig && !sameAsOriginal) {
+        this._applyInputDisconnect(orig.to, orig.toInputId);
+      }
+
+      if (!sameAsOriginal) {
+        this._applyInputConnect(to.nodeId, to.portId, from.nodeId, from.portId);
+      }
+    } else if (isReconnect && orig) {
+      this._applyInputDisconnect(orig.to, orig.toInputId);
+    }
+
+    this.connectionDrag = null;
   }
 
   _canvasPxFromClientPoint(clientX, clientY) {
@@ -836,11 +1068,65 @@ class NodeGraphCanvasElement extends HTMLElement {
 
     const view = this._viewMatrix();
     this._drawEdges(graph.nodes, graph.edges, posById, width, height, view);
+    this._drawActiveConnection(width, height, view);
     this._drawNodes(graph.nodes, posById, width, height, view);
     this._drawSelectionOverlay(graph.nodes, posById, width, height, view);
     this._drawPorts(graph.nodes, graph.edges, posById, width, height, view);
     this._drawLabels(graph.nodes, posById, width, height, view);
     this._drawPickOverlay(this.hoverPick, graph.nodes, graph.edges, posById, width, height, view);
+  }
+
+  _drawActiveConnection(width, height, view) {
+    if (!this.connectionDrag) return;
+    const drag = this.connectionDrag;
+    const edgeCfg = this.assets.edge;
+    const active = this.assets.theme.edgeActive || [133 / 255, 192 / 255, 255 / 255, 1];
+
+    let p0;
+    let p3;
+    if (drag.fixed.direction === "output") {
+      p0 = { x: drag.fixed.x, y: drag.fixed.y };
+      p3 = drag.moving;
+    } else {
+      p0 = drag.moving;
+      p3 = { x: drag.fixed.x, y: drag.fixed.y };
+    }
+
+    const h = Math.max(edgeCfg.handleMin, Math.min(edgeCfg.handleMax, Math.abs(p3.x - p0.x) * 0.5));
+    const data = new Float32Array([
+      p0.x, p0.y,
+      p3.x, p3.y,
+      h,
+      Math.max(edgeCfg.halfWidthPx * 1.35, edgeCfg.halfWidthPx + 0.5),
+      active[0], active[1], active[2], active[3],
+    ]);
+
+    const gl = this.gl;
+    gl.useProgram(this.edgeProgram);
+    gl.bindVertexArray(this.baseVao);
+    gl.bindBuffer(gl.ARRAY_BUFFER, this.edgeBuffer);
+    gl.bufferData(gl.ARRAY_BUFFER, data, gl.DYNAMIC_DRAW);
+    const stride = 10 * 4;
+    gl.enableVertexAttribArray(1);
+    gl.vertexAttribPointer(1, 2, gl.FLOAT, false, stride, 0);
+    gl.vertexAttribDivisor(1, 1);
+    gl.enableVertexAttribArray(2);
+    gl.vertexAttribPointer(2, 2, gl.FLOAT, false, stride, 8);
+    gl.vertexAttribDivisor(2, 1);
+    gl.enableVertexAttribArray(3);
+    gl.vertexAttribPointer(3, 1, gl.FLOAT, false, stride, 16);
+    gl.vertexAttribDivisor(3, 1);
+    gl.enableVertexAttribArray(4);
+    gl.vertexAttribPointer(4, 1, gl.FLOAT, false, stride, 20);
+    gl.vertexAttribDivisor(4, 1);
+    gl.enableVertexAttribArray(5);
+    gl.vertexAttribPointer(5, 4, gl.FLOAT, false, stride, 24);
+    gl.vertexAttribDivisor(5, 1);
+    gl.uniformMatrix3fv(gl.getUniformLocation(this.edgeProgram, "u_view"), false, view);
+    gl.uniform2f(gl.getUniformLocation(this.edgeProgram, "u_viewportPx"), width, height);
+    gl.uniform1f(gl.getUniformLocation(this.edgeProgram, "u_glowPx"), Math.max(edgeCfg.glowPx, 4));
+    gl.uniform1f(gl.getUniformLocation(this.edgeProgram, "u_aaPx"), edgeCfg.aaPx);
+    gl.drawArraysInstanced(gl.TRIANGLE_STRIP, 0, 4, 1);
   }
 
   _worldDistanceToBezier(x, y, p0, p1, p2, p3) {
@@ -956,7 +1242,13 @@ class NodeGraphCanvasElement extends HTMLElement {
       const p2 = { x: p3.x - h, y: p3.y };
       const dist = this._worldDistanceToBezier(worldX, worldY, p0, p1, p2, p3);
       if (dist <= hitRadiusWorld && (!best || dist < best.distance)) {
-        best = { edge, distance: dist };
+        const dStart = Math.hypot(worldX - p0.x, worldY - p0.y);
+        const dEnd = Math.hypot(worldX - p3.x, worldY - p3.y);
+        best = {
+          edge,
+          distance: dist,
+          side: dStart <= dEnd ? "output" : "input",
+        };
       }
     }
 
@@ -1031,6 +1323,18 @@ class NodeGraphCanvasElement extends HTMLElement {
     const data = new Float32Array(edges.length * 10);
     let o = 0;
     for (const edge of edges) {
+      if (this.connectionDrag?.originalEdge) {
+        const orig = this.connectionDrag.originalEdge;
+        if (
+          edge.from === orig.from &&
+          edge.fromOutputId === orig.fromOutputId &&
+          edge.to === orig.to &&
+          edge.toInputId === orig.toInputId
+        ) {
+          continue;
+        }
+      }
+
       const from = posById.get(edge.from);
       const to = posById.get(edge.to);
       if (!from || !to) continue;
@@ -1471,16 +1775,19 @@ class NodeGraphCanvasElement extends HTMLElement {
 
     for (const node of nodes) {
       const pos = posById.get(node.id);
+      const nodeSize = this._getNodeSize(node);
       const labelA = `${node.kind === NG.NODE_CODE ? "code" : node.kind === NG.NODE_GOAL ? "goal" : "node"} #${node.id}`;
-      const labelB = `state ${node.execState}`;
+      const labelState = `state ${node.execState}`;
       const x = pos.x + padX;
       const yA = pos.y + titlePx + 2;
-      const yB = yA + titlePx * 0.92;
 
       gl.uniform4f(colorLoc, c[0], c[1], c[2], c[3]);
       drawText(labelA, x, yA, titleScale);
+
+      const stateWidth = measureTextWidth(labelState, portScale);
+      const stateX = Math.max(x + 56, pos.x + nodeSize.width - padX - stateWidth);
       gl.uniform4f(colorLoc, cMuted[0], cMuted[1], cMuted[2], cMuted[3]);
-      drawText(labelB, x, yB, portScale);
+      drawText(labelState, stateX, yA, portScale);
 
       for (let i = 0; i < node.inputCount; i++) {
         const inputId = node.inputs[i]?.inputId ?? i + 1;
