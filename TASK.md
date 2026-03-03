@@ -47,9 +47,9 @@ Status key: [x] done, [~] partial, [ ] todo
 
 4) Interaction + picking (WebGL + wasm mutations)
    - 4.1 Picking primitives
-     - [ ] Node hit-test
-     - [ ] Port hit-test with configurable hit radius
-     - [ ] Edge hit-test (curve distance threshold)
+     - [x] Node hit-test
+     - [x] Port hit-test with configurable hit radius
+     - [x] Edge hit-test (curve distance threshold)
    - 4.2 Selection behavior
      - [ ] Single select, Ctrl/Cmd multiselect, clear-on-empty
    - 4.3 Node drag

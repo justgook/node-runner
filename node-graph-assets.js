@@ -5,6 +5,7 @@ export function getNodeGraphRenderAssets() {
       text: [214 / 255, 236 / 255, 248 / 255, 1],
       textMuted: [147 / 255, 177 / 255, 194 / 255, 1],
       edge: [70 / 255, 108 / 255, 132 / 255, 0.95],
+      edgeActive: [133 / 255, 192 / 255, 255 / 255, 1],
       edgeSuccess: [44 / 255, 201 / 255, 170 / 255, 0.98],
       edgeError: [255 / 255, 107 / 255, 107 / 255, 0.98],
       edgeStale: [222 / 255, 177 / 255, 95 / 255, 0.98],
@@ -42,6 +43,7 @@ export function getNodeGraphRenderAssets() {
       halfWidthPx: 1.7,
       glowPx: 2.2,
       aaPx: 1.0,
+      hitRadiusPx: 10,
     },
     text: {
       fontPx: 14,
