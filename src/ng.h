@@ -150,7 +150,6 @@ typedef struct {
   ng_u32 node_count;
   ng_i32 is_running;
   ng_u32 active_goal_count;
-  ng_u32 active_goals[NG_MAX_NODES];
 
   ng_i32 io_len;
   NgNode nodes[NG_MAX_NODES];
@@ -209,9 +208,6 @@ ng_i32 ng_node_set_arg(ng_u32 node_id, ng_u32 arg_index, ng_u32 type, ng_i32 a,
                        ng_i32 b);
 
 /* goals + execution */
-NG_EXPORT("ng_goal_set")
-ng_i32 ng_goal_set(ng_u32 node_id, ng_i32 enabled);
-
 NG_EXPORT("ng_run_all_goals")
 ng_i32 ng_run_all_goals(void);
 

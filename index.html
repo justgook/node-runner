@@ -487,10 +487,12 @@
     }
 
     function readI32(off) {
+      if (!dv || dv.buffer !== memory.buffer) dv = new DataView(memory.buffer);
       return dv.getInt32(infoPtr() + off, true);
     }
 
     function readU32(off) {
+      if (!dv || dv.buffer !== memory.buffer) dv = new DataView(memory.buffer);
       return dv.getUint32(infoPtr() + off, true);
     }
 
@@ -537,7 +539,6 @@
         () => api.ng_input_add(2, 1),
         () => api.ng_input_add(2, 2),
         () => api.ng_input_connect(2, 1, 1, 1),
-        () => api.ng_goal_set(2, 1),
 
         // Node 3 (code): 2 inputs, 3 outputs, one input connected
         () => api.ng_node_create(3, 2),
@@ -594,8 +595,8 @@
       sourceByNode.set(1, ui.source.value);
       api.ng_exec_clear_all();
       try {
-        api.ng_run_goal(2);
-        // api.ng_run_all_goals();
+        api.ng_run_all_goals();
+        // api.ng_run_goal(2);
         // api.ng_run_goal(6);
         syncViews();
       } catch (err) {

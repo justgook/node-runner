@@ -81,16 +81,24 @@ async function run() {
   assertEq(api.ng_node_create(1, NG.NODE_CODE), ERR.OK, "create node-code");
   assertEq(api.ng_output_add(1, 1), ERR.OK, "add code output");
 
-  assertEq(api.ng_node_create(2, NG.NODE_GOAL), ERR.OK, "create node-goal");
+  assertEq(api.ng_node_create(2, NG.NODE_GOAL), ERR.OK, "create node-goal 2");
   assertEq(api.ng_input_add(2, 1), ERR.OK, "add goal input");
-  assertEq(api.ng_input_connect(2, 1, 1, 1), ERR.OK, "connect goal <- code");
-  assertEq(api.ng_goal_set(2, 1), ERR.OK, "enable goal");
+  assertEq(api.ng_input_connect(2, 1, 1, 1), ERR.OK, "connect goal 2 <- code");
 
-  assertEq(api.ng_run_goal(2), ERR.OK, "goal pipeline should run");
+  assertEq(api.ng_node_create(3, NG.NODE_GOAL), ERR.OK, "create node-goal 3");
+  assertEq(api.ng_input_add(3, 1), ERR.OK, "add goal 3 input");
+  assertEq(api.ng_input_connect(3, 1, 1, 1), ERR.OK, "connect goal 3 <- code");
+
+  assertEq(api.ng_run_all_goals(), ERR.OK, "all goals should run without activation");
   assertIncludes(readOutputFromInfo(), "hello from node-code", "output should contain Lua print");
 
   assertEq(api.ng_get_node_exec_state(1), NG.EXEC_SUCCESS, "node-code should be success");
-  assertEq(api.ng_get_node_exec_state(2), NG.EXEC_SUCCESS, "node-goal should be success");
+  assertEq(api.ng_get_node_exec_state(2), NG.EXEC_SUCCESS, "node-goal 2 should be success");
+  assertEq(api.ng_get_node_exec_state(3), NG.EXEC_SUCCESS, "node-goal 3 should be success");
+
+  assertEq(api.ng_exec_clear_all(), ERR.OK, "clear exec state before delete");
+  assertEq(api.ng_node_delete(2), ERR.OK, "delete one goal");
+  assertEq(api.ng_run_all_goals(), ERR.OK, "run all goals should ignore deleted goals");
 
   console.log("[test] all checks passed");
 }

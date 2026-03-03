@@ -146,6 +146,19 @@ static void mark_stale_downstream(ng_u32 src_node_id) {
   }
 }
 
+static void refresh_active_goal_count(void) {
+  ng_u32 i;
+  g_info.active_goal_count = 0;
+  for (i = 0; i < NG_MAX_NODES; i++) {
+    NgNode *node = &g_info.nodes[i];
+    if (node->id == 0)
+      continue;
+    if (node->kind != NG_NODE_GOAL)
+      continue;
+    g_info.active_goal_count += 1;
+  }
+}
+
 static ng_i32 run_lua_source(const char *src, size_t len) {
   int status;
   if (g_lua == NULL)
@@ -283,6 +296,7 @@ ng_i32 ng_node_create(ng_u32 node_id, ng_u32 kind) {
   node->kind = kind;
   node->exec_state = NG_EXEC_NEVER;
   g_info.node_count += 1;
+  refresh_active_goal_count();
   g_info.generation += 1;
   set_last_error(NG_OK);
   notify_node_changed(node_id, NG_CHANGE_NODE_META | NG_CHANGE_GRAPH);
@@ -297,6 +311,7 @@ ng_i32 ng_node_replace(ng_u32 node_id, ng_u32 kind) {
   node->id = node_id;
   node->kind = kind;
   node->exec_state = NG_EXEC_NEVER;
+  refresh_active_goal_count();
   g_info.generation += 1;
   set_last_error(NG_OK);
   notify_node_changed(node_id, NG_CHANGE_NODE_META | NG_CHANGE_NODE_PORTS |
@@ -313,6 +328,7 @@ ng_i32 ng_node_delete(ng_u32 node_id) {
   if (node == NULL)
     return NG_ERR_NOT_FOUND;
   memset(node, 0, sizeof(*node));
+  refresh_active_goal_count();
   if (g_info.node_count > 0)
     g_info.node_count -= 1;
   for (i = 0; i < NG_MAX_NODES; i++) {
@@ -510,40 +526,6 @@ ng_i32 ng_node_set_arg(ng_u32 node_id, ng_u32 arg_index, ng_u32 type, ng_i32 a,
   return NG_OK;
 }
 
-ng_i32 ng_goal_set(ng_u32 node_id, ng_i32 enabled) {
-  ng_u32 i;
-  NgNode *node = find_node(node_id);
-  if (node == NULL)
-    return NG_ERR_NOT_FOUND;
-  if (node->kind != NG_NODE_GOAL)
-    return NG_ERR_VALIDATION;
-
-  for (i = 0; i < g_info.active_goal_count; i++) {
-    if (g_info.active_goals[i] == node_id)
-      break;
-  }
-
-  if (enabled) {
-    if (i == g_info.active_goal_count) {
-      if (g_info.active_goal_count >= NG_MAX_NODES)
-        return NG_ERR_CAPACITY;
-      g_info.active_goals[g_info.active_goal_count] = node_id;
-      g_info.active_goal_count += 1;
-    }
-  } else if (i < g_info.active_goal_count) {
-    if (i + 1 < g_info.active_goal_count) {
-      memmove(&g_info.active_goals[i], &g_info.active_goals[i + 1],
-              (size_t)(g_info.active_goal_count - (i + 1)) * sizeof(ng_u32));
-    }
-    g_info.active_goal_count -= 1;
-  }
-
-  g_info.generation += 1;
-  set_last_error(NG_OK);
-  notify_node_changed(node_id, NG_CHANGE_GRAPH);
-  return NG_OK;
-}
-
 ng_i32 ng_run_goal(ng_u32 goal_node_id) {
   ng_i32 err;
   ng_u8 visit[NG_MAX_NODES];
@@ -564,13 +546,20 @@ ng_i32 ng_run_goal(ng_u32 goal_node_id) {
 
 ng_i32 ng_run_all_goals(void) {
   ng_u32 i;
+  NgNode *node;
   ng_i32 err = NG_OK;
   ng_u8 visit[NG_MAX_NODES];
+  refresh_active_goal_count();
   memset(visit, 0, sizeof(visit));
   g_info.is_running = 1;
   notify_run_event(0, NG_RUN_EVENT_RUN_STARTED, NG_OK);
-  for (i = 0; i < g_info.active_goal_count; i++) {
-    err = execute_node(g_info.active_goals[i], visit);
+  for (i = 0; i < NG_MAX_NODES; i++) {
+    node = &g_info.nodes[i];
+    if (node->id == 0)
+      continue;
+    if (node->kind != NG_NODE_GOAL)
+      continue;
+    err = execute_node(node->id, visit);
     if (err != NG_OK)
       break;
   }

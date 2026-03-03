@@ -2,10 +2,11 @@ Status key: [x] done, [~] partial, [ ] todo
 
 1) Foundation: wasm-first graph model (headless-capable)
    - 1.1 Define wasm graph API contract (authoritative state)
-     - [~] Node CRUD (id, kind, title, position, z-index/layer)
-     - [~] Port metadata (name, direction, data type, flags)
-     - [~] Edge CRUD (fromNode/fromPort -> toNode/toPort)
-     - [ ] Selection state (optional in wasm, recommended for deterministic behavior)
+      - [~] Node CRUD (id, kind, title, position, z-index/layer)
+      - [~] Port metadata (name, direction, data type, flags)
+      - [~] Edge CRUD (fromNode/fromPort -> toNode/toPort)
+      - [~] Arg/value contract using NgValueSlot (typed a/b payload + io_buf refs)
+      - [ ] Selection state (optional in wasm, recommended for deterministic behavior)
    - 1.2 Generation/versioning model
      - [x] Increment generation on every mutation
      - [x] Expose minimal read APIs for renderer snapshots
@@ -62,19 +63,35 @@ Status key: [x] done, [~] partial, [ ] todo
    - 4.5 Camera controls
      - [~] Pan, zoom-at-cursor, fit-to-content
 
-5) Actions layer (after visuals + interaction baseline)
-   - 5.1 Node actions
-     - [ ] Run/rerun node
-     - [ ] Edit node payload/args
-     - [ ] Delete selected node(s)
-   - 5.2 Graph actions
-     - [ ] Add node, run graph, save/load, reload, zoom in/out/fit
-   - 5.3 Keyboard/event bindings
-     - [ ] delete/backspace, run, create, zoom commands
+5) Editing + execution UX (high priority)
+   - 5.1 Node editing
+      - [ ] Edit node payload/args (form + validation + apply/cancel)
+      - [ ] Edit node title/kind where allowed by schema
+      - [ ] Delete selected node(s)
+   - 5.2 Code/data interactions (inputs/outputs)
+     - [ ] Define per-port binding model (constant | edge | computed/default)
+     - [ ] Input editor by type (string/number/bool/json/code ref)
+     - [ ] Output preview panel (value/error/stale/loading)
+     - [ ] Validation feedback on incompatible type/link/binding
+   - 5.3 Execution UX (graph-level)
+      - [ ] Run graph / stop / rerun graph
+      - [ ] Node execution state visualization (idle/running/success/error/stale)
+      - [ ] Error surfacing: node-level error + graph run summary
+   - 5.4 Node-type editor contracts (align with ng.h)
+      - [ ] VALUE node: outputs editor + arg[0]=value_index/value_id (NgValueSlot), host resolves NG_RESOLVE_VALUE
+      - [ ] CODE node: inputs/outputs editor + arg[0]=code_value_id (NgValueSlot), host resolves NG_RESOLVE_CODE
+      - [ ] GOAL node: inputs editor only (no custom outputs required)
+      - [ ] Keep stable input_id/output_id during rename/reorder to avoid edge churn
+   - 5.5 NgValueSlot UX mapping
+      - [ ] Support NG_VAL_EMPTY/BOOL/I64/F64/STRING_REF in editor widgets
+      - [ ] Define policy for BYTES_REF and UTF-8 STRING_REF via io_buf
+      - [ ] Validate arg index usage per node kind (reserved slots, bounds, type checks)
 
-6) Persistence + tooling
-   - [ ] 6.1 Serialize/deserialize through wasm model (not DOM)
-   - [ ] 6.2 Save/load pipelines
+6) Persistence + tooling (last phase, split backend/UI)
+   - [ ] 6.1 Backend/model persistence contract
+         (wasm serialize/deserialize + versioning/migrations)
+   - [ ] 6.2 UI persistence pipeline
+         (save/load/reload wiring; include non-wasm UI state policy)
    - [ ] 6.3 Template/node creation workflow
    - [ ] 6.4 Optional node attribute editor UI
 
@@ -86,9 +103,12 @@ Status key: [x] done, [~] partial, [ ] todo
 Recommendation (updated next steps)
    - [x] A) 2.1 + 2.2 + 3.2 completed (asset schema + port sprites)
    - [x] B) 3.3 completed (edge anchors from real port layout)
-   - [ ] C) Implement 4.x interaction/picking against wasm mutations
-   - [ ] D) Add 5.x actions and 6.x persistence UX
-   - [ ] E) Add hover/active/invalid port state assets (no tint), plus selection outlines/overlays
+   - [ ] C) Finish 4.x interaction/picking parity + selection/hover visual mapping
+   - [ ] D) Implement 5.4 node-type contracts first (VALUE/CODE/GOAL editors)
+   - [ ] E) Implement 5.1 + 5.2 + 5.5 (typed editing + I/O interactions via NgValueSlot)
+   - [ ] F) Implement 5.3 graph-level execution UX (no individual node run action)
+   - [ ] G) Persistence as final phase: 6.1 backend/model first, then 6.2 UI pipeline
+   - [ ] H) QA hardening (7.x)
 
 Notes for node-graph-assets.js cleanup
    - Candidate removals (if still unused):

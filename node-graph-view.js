@@ -22,7 +22,7 @@ ABI.NODE_SIZE =
 
 const INFO = {
   GENERATION: 8,
-  NODES: 24 + NG.MAX_NODES * ABI.I32 + ABI.I32,
+  NODES: 24 + ABI.I32,
 };
 
 const NODE = {
@@ -209,8 +209,17 @@ class NodeGraphCanvasElement extends HTMLElement {
     this.requestRenderIfGenerationChanged(true);
   }
 
+  _ensureDataView() {
+    if (!this.memory) return false;
+    if (!this.dv || this.dv.buffer !== this.memory.buffer) {
+      this.dv = new DataView(this.memory.buffer);
+    }
+    return true;
+  }
+
   requestRenderIfGenerationChanged(force = false) {
     if (!this.gl || !this.api || !this.memory || !this.assets) return;
+    if (!this._ensureDataView()) return;
     const generation = this.dv.getUint32(this.api.ng_get_info_ptr() + INFO.GENERATION, true);
     const sizeKey = this._resizeCanvas();
     if (!force && generation === this.lastGeneration && sizeKey === this.lastSizeKey) return;
