@@ -13,8 +13,10 @@ typedef __UINT8_TYPE__ ng_u8;
 
 #if defined(__wasm__)
 #define NG_EXPORT(name) __attribute__((export_name(name)))
+#define NG_IMPORT(name) __attribute__((import_module("env"), import_name(name)))
 #else
 #define NG_EXPORT(name)
+#define NG_IMPORT(name)
 #endif
 
 /* ---- Capacity constants ---------------------------------------------- */
@@ -260,23 +262,29 @@ ng_i32 ng_get_node_exec_state(ng_u32 node_id);
 /* ---- Host imports (implemented by host) ------------------------------ */
 
 /* compact event callbacks, no JSON */
+NG_IMPORT("ng_on_node_changed")
 void ng_on_node_changed(ng_u32 node_id, ng_u32 change_mask);
+
+NG_IMPORT("ng_on_run_event")
 void ng_on_run_event(ng_u32 node_id, ng_u32 event_kind, ng_i32 error_code);
 
 /* lazy resolver for code/call/value data
  * - req_ptr/req_len is an opaque byte request (format defined by resolve_kind)
  * - out_ptr/out_cap receives opaque bytes to be interpreted by node runtime
  */
+NG_IMPORT("ng_host_resolve")
 ng_i32 ng_host_resolve(ng_u32 node_id, ng_u32 resolve_kind, const char *req_ptr,
                        ng_i32 req_len, char *out_ptr, ng_i32 out_cap,
                        ng_i32 *out_len);
 
 /* async host call request from Lua host.awaitCall(service, method, payload_json) */
+NG_IMPORT("ng_host_request")
 ng_i32 ng_host_request(ng_u32 node_id, ng_u32 request_id, const char *service_ptr,
                        ng_i32 service_len, const char *method_ptr,
                        ng_i32 method_len, const char *payload_ptr,
                        ng_i32 payload_len);
 
 #undef NG_EXPORT
+#undef NG_IMPORT
 
 #endif /* NG_H */

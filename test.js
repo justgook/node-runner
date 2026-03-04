@@ -1,6 +1,5 @@
 const fs = require("fs");
 const path = require("path");
-const { WASI } = require("node:wasi");
 
 const ERR = {
   OK: 0,
@@ -33,16 +32,36 @@ async function run() {
   let memory = null;
   const sourceMap = new Map([[1, 'local resp = host.awaitCall("mock", "get", "seed")\nprint(resp)']]);
 
-  const wasi = new WASI({
-    version: "preview1",
-    args: ["node-runner.wasm"],
-    env: {},
-    preopens: {},
-  });
+  const wasiPreview1 = {
+    clock_time_get: (_clockId, _precision, outPtr) => {
+      if (!memory) return 0;
+      new DataView(memory.buffer).setBigUint64(outPtr, BigInt(Date.now() * 1000000), true);
+      return 0;
+    },
+    fd_close: () => 0,
+    fd_fdstat_get: () => 58,
+    fd_fdstat_set_flags: () => 58,
+    fd_prestat_get: () => 58,
+    fd_prestat_dir_name: () => 58,
+    fd_read: () => 52,
+    fd_renumber: () => 58,
+    fd_seek: (_fd, _offsetLow, _offsetHigh, _whence, newOffsetPtr) => {
+      if (memory) new DataView(memory.buffer).setBigUint64(newOffsetPtr, 0n, true);
+      return 52;
+    },
+    fd_write: (_fd, _iovs, _iovsLen, nwrittenPtr) => {
+      if (memory) new DataView(memory.buffer).setUint32(nwrittenPtr, 0, true);
+      return 0;
+    },
+    path_open: () => 52,
+    proc_exit: (code) => {
+      throw new Error(`wasi proc_exit(${code})`);
+    },
+  };
 
   const wasmBytes = fs.readFileSync(wasmPath);
   const { instance } = await WebAssembly.instantiate(wasmBytes, {
-    wasi_snapshot_preview1: wasi.wasiImport,
+    wasi_snapshot_preview1: wasiPreview1,
     env: {
       ng_on_node_changed: () => { },
       ng_on_run_event: () => { },
@@ -67,7 +86,6 @@ async function run() {
       ng_host_request: () => 0,
     },
   });
-  wasi.start(instance);
 
   const api = instance.exports;
   memory = api.memory;

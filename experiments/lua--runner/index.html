@@ -1,0 +1,341 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Lua WASM Runner</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --bg: #f1efe6;
+        --panel: #fffaf0;
+        --ink: #17222d;
+        --accent: #0b5f7a;
+        --accent-2: #0f8f8f;
+        --error: #a21616;
+        --line: #d8d2c2;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        font-family: "IBM Plex Sans", "Avenir Next", "Segoe UI", sans-serif;
+        color: var(--ink);
+        background:
+          radial-gradient(circle at 10% 10%, #ffffff80 0, #ffffff00 30%),
+          radial-gradient(circle at 90% 20%, #fff2c080 0, #ffffff00 35%),
+          linear-gradient(145deg, #f4f1e7 0%, #e8ecef 100%);
+        display: grid;
+        place-items: center;
+        padding: 24px;
+      }
+
+      .app {
+        width: min(900px, 100%);
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        box-shadow: 0 24px 50px #1326351f;
+        overflow: hidden;
+      }
+
+      .top {
+        padding: 18px 20px;
+        border-bottom: 1px solid var(--line);
+        background: linear-gradient(90deg, #f8f3e5, #edf5f6);
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 1.2rem;
+        letter-spacing: 0.02em;
+      }
+
+      .hint {
+        margin-top: 8px;
+        font-size: 0.92rem;
+        color: #44525f;
+      }
+
+      .body {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 12px;
+        padding: 14px;
+      }
+
+      textarea {
+        width: 100%;
+        min-height: 280px;
+        resize: vertical;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 14px;
+        font: 15px/1.5 "IBM Plex Mono", "Cascadia Code", monospace;
+        color: #1e2f3b;
+        background: #fffdf7;
+      }
+
+      .controls {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+      }
+
+      button {
+        border: none;
+        border-radius: 999px;
+        background: linear-gradient(90deg, var(--accent), var(--accent-2));
+        color: #fff;
+        font-weight: 700;
+        letter-spacing: 0.02em;
+        padding: 10px 20px;
+        cursor: pointer;
+      }
+
+      button:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
+
+      #status {
+        font-size: 0.9rem;
+        color: #304453;
+      }
+
+      pre {
+        margin: 0;
+        min-height: 220px;
+        padding: 14px;
+        border-radius: 12px;
+        border: 1px solid #1f2f3f;
+        background: #13202a;
+        color: #d9edf7;
+        overflow: auto;
+        font: 14px/1.45 "IBM Plex Mono", "Cascadia Code", monospace;
+      }
+
+      .line-error {
+        color: #ff9f9f;
+      }
+    </style>
+  </head>
+  <body>
+    <main class="app">
+      <div class="top">
+        <h1>Lua in WebAssembly</h1>
+        <div class="hint">Use <code>print()</code> for output and <code>host.http_get(url, callback)</code> for async host calls.</div>
+      </div>
+      <div class="body">
+        <textarea id="code">print("Lua runner ready")
+
+host.http_get("https://jsonplaceholder.typicode.com/todos/1", function(err, body, status)
+  if err then
+    error("HTTP failed: " .. err)
+  end
+
+  print("status", status)
+  print("title found", string.find(body, "delectus") ~= nil)
+end)</textarea>
+        <div class="controls">
+          <button id="run">Run</button>
+          <span id="status">loading wasm...</span>
+        </div>
+        <pre id="output"></pre>
+      </div>
+    </main>
+
+    <script>
+      const output = document.getElementById("output");
+      const runButton = document.getElementById("run");
+      const statusEl = document.getElementById("status");
+      const codeEl = document.getElementById("code");
+
+      const encoder = new TextEncoder();
+      const decoder = new TextDecoder();
+
+      let wasm;
+      let memory;
+
+      function appendLine(text, isError = false) {
+        const line = document.createElement("div");
+        if (isError) {
+          line.className = "line-error";
+        }
+        line.textContent = text;
+        output.appendChild(line);
+        output.scrollTop = output.scrollHeight;
+      }
+
+      function clearOutput() {
+        output.textContent = "";
+      }
+
+      function readString(ptr, len) {
+        return decoder.decode(new Uint8Array(memory.buffer, ptr, len));
+      }
+
+      function allocString(value) {
+        const bytes = encoder.encode(value);
+        const ptr = wasm.wasm_alloc(bytes.length || 1);
+        if (!ptr) {
+          throw new Error("wasm_alloc returned null");
+        }
+        new Uint8Array(memory.buffer, ptr, bytes.length).set(bytes);
+        return { ptr, len: bytes.length };
+      }
+
+      function freeString(ptr) {
+        wasm.wasm_dealloc(ptr);
+      }
+
+      function respondToLua(requestId, status, body, err) {
+        const bodyBuf = allocString(body || "");
+        const errBuf = allocString(err || "");
+
+        try {
+          wasm.wasm_http_response(
+            requestId,
+            status,
+            bodyBuf.ptr,
+            bodyBuf.len,
+            errBuf.ptr,
+            errBuf.len,
+          );
+        } finally {
+          freeString(bodyBuf.ptr);
+          freeString(errBuf.ptr);
+        }
+      }
+
+      function createImports() {
+        const wasi = {
+          clock_time_get(_clockId, _precision, outPtr) {
+            if (!memory) {
+              return 0;
+            }
+            const nowNs = BigInt(Date.now()) * 1000000n;
+            new DataView(memory.buffer).setBigUint64(outPtr, nowNs, true);
+            return 0;
+          },
+          fd_close() {
+            return 0;
+          },
+          fd_fdstat_get() {
+            return 8;
+          },
+          fd_fdstat_set_flags() {
+            return 0;
+          },
+          fd_prestat_get() {
+            return 8;
+          },
+          fd_prestat_dir_name() {
+            return 8;
+          },
+          fd_read() {
+            return 8;
+          },
+          fd_renumber() {
+            return 0;
+          },
+          fd_seek() {
+            return 0;
+          },
+          fd_write(_fd, _iovs, _iovLen, writtenPtr) {
+            if (!memory) {
+              return 0;
+            }
+            new DataView(memory.buffer).setUint32(writtenPtr, 0, true);
+            return 0;
+          },
+          path_open() {
+            return 8;
+          },
+          proc_exit(code) {
+            throw new Error(`WASI proc_exit(${code})`);
+          },
+        };
+
+        return {
+          wasi_snapshot_preview1: wasi,
+          env: {
+            host_print(ptr, len) {
+              appendLine(readString(ptr, len));
+            },
+            host_error(ptr, len) {
+              appendLine(readString(ptr, len), true);
+            },
+            host_http_get(requestId, ptr, len) {
+              const url = readString(ptr, len);
+
+              (async () => {
+                try {
+                  const response = await fetch(url);
+                  const body = await response.text();
+                  respondToLua(requestId, response.status, body, "");
+                } catch (error) {
+                  const message = error && error.stack ? error.stack : String(error);
+                  respondToLua(requestId, 0, "", message);
+                }
+              })();
+            },
+          },
+        };
+      }
+
+      async function loadWasm() {
+        const moduleResponse = await fetch("./dist/lua_runner.wasm");
+        if (!moduleResponse.ok) {
+          throw new Error("cannot fetch ./dist/lua_runner.wasm (run ./build.sh first)");
+        }
+
+        const bytes = await moduleResponse.arrayBuffer();
+        const { instance } = await WebAssembly.instantiate(bytes, createImports());
+        wasm = instance.exports;
+        memory = wasm.memory;
+
+        const initStatus = wasm.wasm_init();
+        if (initStatus !== 0) {
+          throw new Error("wasm_init failed");
+        }
+      }
+
+      runButton.addEventListener("click", () => {
+        if (!wasm) {
+          appendLine("WASM not ready", true);
+          return;
+        }
+
+        clearOutput();
+
+        const source = codeEl.value;
+        const codeBuf = allocString(source);
+
+        try {
+          wasm.wasm_run(codeBuf.ptr, codeBuf.len);
+        } catch (error) {
+          appendLine(error && error.stack ? error.stack : String(error), true);
+        } finally {
+          freeString(codeBuf.ptr);
+        }
+      });
+
+      (async () => {
+        runButton.disabled = true;
+        try {
+          await loadWasm();
+          statusEl.textContent = "wasm loaded";
+          runButton.disabled = false;
+        } catch (error) {
+          statusEl.textContent = "failed to load wasm";
+          appendLine(error && error.stack ? error.stack : String(error), true);
+        }
+      })();
+    </script>
+  </body>
+</html>
